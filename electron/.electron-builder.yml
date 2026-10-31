@@ -1,0 +1,6 @@
+﻿name: wicked-player
+appId: com.wick.dev.wickedplayer
+productName: Wicked Player
+directories: {output:"dist/electron"}
+files: ["electron/**/*","wicked-frontend/dist/**/*"]
+win: {target:["nsis"]}  

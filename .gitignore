@@ -1,0 +1,6 @@
+﻿node_modules
+.env
+wicked-backend/data/
+wicked-frontend/dist
+electron/*.exe
+wicked-frontend/public/wicked-icon.png

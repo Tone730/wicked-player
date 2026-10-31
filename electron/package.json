@@ -1,0 +1,9 @@
+﻿{
+  "name":"wicked-player",
+  "productName":"Wicked Player",
+  "appId":"com.wick.dev.wickedplayer",
+  "main":"main.js",
+  "type":"module",
+  "scripts":{ "start":"electron .", "packaging":"npm run build && electron-builder -w" },
+  "devDependencies":{ "electron":"^30.0.0", "electron-builder":"^24.0.0" }
+}
