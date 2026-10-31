@@ -1,9 +1,11 @@
 ﻿const express = require('express');
 const http = require('http');
 const fs = require('fs').promises;
+const path = require('path');
 const cors = require('cors');
 const session = require('express-session');
 const { Server } = require('socket.io');
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -17,9 +19,12 @@ const usersFile = "./wicked-backend/data/users.json";
 const codesFile = "./wicked-backend/data/codes.json";
 
 async function jsonRead(file) {
-  try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return {}; }
+  try { return JSON.parse(await fs.readFile(file, 'utf8')); }
+  catch { return {}; }
 }
-async function jsonWrite(file, data) { await fs.writeFile(file, JSON.stringify(data, null, 2)); }
+async function jsonWrite(file, data) {
+  await fs.writeFile(file, JSON.stringify(data, null, 2));
+}
 
 // ---- login --------------------------------------------------
 app.post('/api/login', async (req, res) => {
@@ -33,7 +38,10 @@ app.post('/api/login', async (req, res) => {
 
 // ---- admin ---------------------------------------------
 const ADMIN_KEY = '72e9a3f1-5c08-4b6c-8e6b-7f2f60e0eda3';
-const adminAuth = (req, res, next) => { if (req.get('X-ADMIN-KEY') !== ADMIN_KEY) return res.status(401).json({ msg: 'no' }); next(); };
+const adminAuth = (req, res, next) => {
+  if (req.get('X-ADMIN-KEY') !== ADMIN_KEY) return res.status(401).json({ msg: 'no' });
+  next();
+};
 
 app.post('/api/admin/give-premium', adminAuth, async (req, res) => {
   const { email } = req.body;
@@ -47,7 +55,10 @@ app.post('/api/admin/give-premium', adminAuth, async (req, res) => {
 app.post('/api/admin/revoke-premium', adminAuth, async (req, res) => {
   const { email } = req.body;
   const users = await jsonRead(usersFile);
-  if (users[email]) { users[email].premium = false; users[email].revoked = true; }
+  if (users[email]) {
+    users[email].premium = false;
+    users[email].revoked = true;
+  }
   await jsonWrite(usersFile, users);
   res.json({ ok: true });
 });
@@ -55,7 +66,9 @@ app.post('/api/admin/revoke-premium', adminAuth, async (req, res) => {
 app.post('/api/admin/generate-code', adminAuth, async (req, res) => {
   const len = req.body.len || 8;
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const code = Array.from({ length: len }, () => chars.charAt(Math.floor(Math.random() * chars.length))).join('');
+  const code = Array.from({ length: len }, () =>
+    chars.charAt(Math.floor(Math.random() * chars.length))
+  ).join('');
   const codes = await jsonRead(codesFile);
   codes[code] = true;
   await jsonWrite(codesFile, codes);
@@ -78,9 +91,6 @@ app.post('/api/redeem-code', async (req, res) => {
 });
 
 // ---- socket.io ---------------------------------
-async function jsonRead(file) { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return {}; } }
-async function jsonWrite(file, data) { await fs.writeFile(file, JSON.stringify(data, null, 2)); }
-
 io.on('connection', socket => {
   const user = socket.handshake.session.user || 'anonymous';
   socket.user = user;
@@ -98,13 +108,24 @@ async function updateLastSeen(email) {
 
 async function broadcastOnline() {
   const users = await jsonRead(usersFile);
-  const online = Object.values(io.sockets.sockets).map(s => s.handshake.session.user).filter(Boolean);
-  const payload = Object.keys(users).reduce((o,k)=>{ o[k] = { premium: users[k].premium, online: online.includes(k), lastSeen: users[k].lastSeen || 0 }; return o;}, {});
+  const online = Object.values(io.sockets.sockets)
+    .map(s => s.handshake.session.user)
+    .filter(Boolean);
+  const payload = Object.keys(users).reduce((o, k) => {
+    o[k] = {
+      premium: users[k].premium,
+      online: online.includes(k),
+      lastSeen: users[k].lastSeen || 0
+    };
+    return o;
+  }, {});
   io.emit('online', payload);
 }
 
 // ---- serve the Vite build ---------------------------------
-app.use(express.static('../wicked-frontend/dist'));
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'wicked-frontend', 'dist', 'index.html'), { root: __dirname }));
+app.use(express.static(path.join(__dirname, '..', 'wicked-frontend', 'dist')));
+app.get('*', (req, res) => res.sendFile(
+  path.join(__dirname, '..', 'wicked-frontend', 'dist', 'index.html')
+));
 
 server.listen(5000, () => console.log('⚡️ backend listening on http://localhost:5000'));
