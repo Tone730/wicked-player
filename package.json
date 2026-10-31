@@ -1,0 +1,8 @@
+{
+  "name": "wicked-player-monorepo",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "cd wicked-frontend && npm install && npm run build",
+    "start": "cd wicked-backend && node server.js"
+  }
+}

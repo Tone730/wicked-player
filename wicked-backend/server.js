@@ -128,4 +128,4 @@ app.get('*', (req, res) => res.sendFile(
   path.join(__dirname, '..', 'wicked-frontend', 'dist', 'index.html')
 ));
 
-server.listen(5000, () => console.log('⚡️ backend listening on http://localhost:5000'));
+server.listen(process.env.PORT || 5000, () => console.log('⚡️ Backend up'));
