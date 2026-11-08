@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wicked Player — Admin</title>
+<link rel="icon" type="image/svg+xml" href="/wicked-icon.svg" />
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+<style>
+  :root { --accent: rgb(168,85,247); --bg:#07060d; --panel:rgba(255,255,255,.04); --line:rgba(255,255,255,.09);
+    --text:#f4f2ff; --muted:rgba(244,242,255,.55); --ok:#34d399; --warn:#fbbf24; --bad:#fda4af; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Outfit','Segoe UI',sans-serif; background:var(--bg); color:var(--text); padding:28px; }
+  .head { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:12px; }
+  .head h1 { font-size:22px; display:flex; align-items:center; gap:12px; }
+  .head img { width:38px; height:38px; border-radius:10px; }
+  .tabs { display:flex; gap:8px; }
+  .tab { padding:9px 18px; border-radius:11px; background:var(--panel); border:1px solid var(--line);
+    cursor:pointer; font-size:13px; font-weight:600; color:var(--muted); }
+  .tab.on { color:var(--text); border-color:var(--accent); }
+  .stats { display:flex; gap:12px; margin-bottom:22px; flex-wrap:wrap; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 20px; min-width:130px; }
+  .stat b { font-size:24px; display:block; }
+  .stat span { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; color:var(--muted); font-size:11px; letter-spacing:1px; padding:10px 12px; border-bottom:1px solid var(--line); }
+  td { padding:12px; border-bottom:1px solid rgba(255,255,255,.05); font-size:14px; vertical-align:middle; }
+  tr:hover td { background:rgba(255,255,255,.025); }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:700; }
+  .pill.admin { background:rgba(168,85,247,.18); color:#d8b4fe; }
+  .pill.user { background:rgba(255,255,255,.07); color:var(--muted); }
+  .pill.banned { background:rgba(253,164,175,.15); color:var(--bad); }
+  .pill.online { background:rgba(52,211,153,.15); color:var(--ok); }
+  .pill.off { background:rgba(255,255,255,.05); color:var(--muted); }
+  .avatar { width:30px; height:30px; border-radius:50%; vertical-align:middle; margin-right:8px; background:rgba(255,255,255,.08); }
+  .uname { font-weight:600; }
+  .actions { display:flex; gap:6px; flex-wrap:wrap; }
+  .abtn { padding:6px 11px; border-radius:9px; border:1px solid var(--line); background:rgba(255,255,255,.05);
+    color:var(--text); font-size:12px; cursor:pointer; font-family:inherit; white-space:nowrap; }
+  .abtn:hover { border-color:var(--accent); }
+  .abtn.danger:hover { border-color:var(--bad); color:var(--bad); }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:10; }
+  .modal { background:#12101f; border:1px solid var(--line); border-radius:18px; padding:28px; width:min(430px,92vw); }
+  .modal h3 { margin-bottom:14px; }
+  .modal input, .modal select { width:100%; background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text);
+    border-radius:10px; padding:11px 12px; margin-bottom:12px; font-family:inherit; font-size:14px; outline:none; }
+  .mrow { display:flex; gap:8px; }
+  .mrow .abtn { flex:1; padding:11px; font-size:13px; }
+  .toolbar { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+  .searchbox { flex:1; min-width:200px; background:rgba(255,255,255,.05); border:1px solid var(--line); color:var(--text);
+    border-radius:11px; padding:11px 14px; font-family:inherit; font-size:14px; outline:none; }
+  .logline { font-family:Consolas,monospace; font-size:12px; padding:8px 10px; border-bottom:1px solid rgba(255,255,255,.05); color:var(--muted); }
+  .logline b { color:var(--text); }
+  .panel { display:none; }
+  .panel.on { display:block; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1><img src="/wicked-icon.svg" /> Wicked Player — Admin Console</h1>
+    <div class="tabs">
+      <div class="tab on" data-p="users">Users</div>
+      <div class="tab" data-p="online">Live</div>
+      <div class="tab" data-p="logins">Logins</div>
+      <div class="tab" onclick="location.href='/'">← Back to app</div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b id="stTotal">–</b><span>accounts</span></div>
+    <div class="stat"><b id="stOnline">–</b><span>online now</span></div>
+    <div class="stat"><b id="stBanned">–</b><span>banned</span></div>
+    <div class="stat"><b id="stDiscord">–</b><span>discord linked</span></div>
+  </div>
+
+  <!-- DISCORD RPC CONFIG -->
+  <div class="panel on" style="margin-bottom:22px;">
+    <div class="toolbar" style="align-items:flex-end;">
+      <div style="flex:1;min-width:260px;">
+        <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:1px;">DISCORD APPLICATION ID — enables "Listening to" Rich Presence for everyone</label>
+        <input class="searchbox" id="rpcId" placeholder="paste your Discord application ID (15-25 digits)" />
+      </div>
+      <button class="abtn" onclick="saveRpc()">Save & activate</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);">Create a free app at <a href="https://discord.com/developers/applications" target="_blank" style="color:#d8b4fe;">discord.com/developers/applications</a> → copy the Application ID → paste here. In the app's settings enable "Art Assets" so album art shows in Discord. Restart the player after saving.</div>
+  </div>
+
+  <!-- USERS -->
+  <div class="panel on" id="p-users">
+    <div class="toolbar">
+      <input class="searchbox" id="filter" placeholder="Filter users…" />
+      <button class="abtn" onclick="openCreate()">＋ Create account</button>
+      <button class="abtn" onclick="loadUsers()">⟳ Refresh</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th>USER</th><th>ROLE</th><th>DISCORD</th><th>STATUS</th><th>LAST SEEN</th><th>ACTIONS</th>
+      </tr></thead>
+      <tbody id="userRows"></tbody>
+    </table>
+  </div>
+
+  <!-- ONLINE -->
+  <div class="panel" id="p-online">
+    <table><thead><tr><th>USER</th><th>IP</th><th>DEVICE</th><th>LAST SEEN</th></tr></thead>
+    <tbody id="onlineRows"></tbody></table>
+  </div>
+
+  <!-- LOGINS -->
+  <div class="panel" id="p-logins">
+    <table><thead><tr><th>USER</th><th>LOGGED IN</th><th>IP</th><th>DEVICE</th></tr></thead>
+    <tbody id="loginRows"></tbody></table>
+  </div>
+
+  <!-- modals -->
+  <div class="modal-bg" id="modalBg">
+    <div class="modal" id="modalBody"></div>
+  </div>
+
+<script>
+  const $ = (s) => document.querySelector(s);
+  const fmt = (ts) => ts ? new Date(ts).toLocaleString() : '—';
+  const ago = (ts) => { if (!ts) return 'never';
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return s + 's ago'; if (s < 3600) return Math.floor(s/60) + 'm ago';
+    if (s < 86400) return Math.floor(s/3600) + 'h ago'; return Math.floor(s/86400) + 'd ago'; };
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&','<':'<','>':'>','"':'"'}[c]));
+
+  async function api(path, body) {
+    const res = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.error || res.status);
+    return d;
+  }
+
+  let USERS = [];
+  async function loadUsers() {
+    try {
+      USERS = await api('/admin/api/users');
+      renderUsers();
+      $('#stTotal').textContent = USERS.length;
+      $('#stBanned').textContent = USERS.filter(u => u.banned).length;
+      $('#stDiscord').textContent = USERS.filter(u => u.discord).length;
+    } catch (e) { alert('Failed to load users: ' + e.message); }
+  }
+
+  function renderUsers() {
+    const q = ($('#filter').value || '').toLowerCase();
+    const rows = USERS.filter(u => u.username.toLowerCase().includes(q));
+    $('#userRows').innerHTML = rows.map(u => {
+      const online = u.lastSeen && (Date.now() - u.lastSeen < 5 * 60 * 1000);
+      let status = `<span class="pill ${online ? 'online' : 'off'}">${online ? '● online' : 'offline'}</span>`;
+      if (u.banned) {
+        status = u.bannedUntil
+          ? `<span class="pill banned">⏱ until ${fmt(u.bannedUntil)}</span>`
+          : `<span class="pill banned">⛔ permanent</span>`;
+      }
+      const discord = u.discord
+        ? `<img class="avatar" src="${esc(u.discord.avatar)}" onerror="this.style.visibility='hidden'" />${esc(u.discord.username)}`
+        : '<span style="color:var(--muted)">—</span>';
+      const actions = [];
+      if (!u.banned) actions.push(`<button class="abtn danger" onclick="banModal('${esc(u.username)}')">Ban</button>`);
+      else actions.push(`<button class="abtn" onclick="unban('${esc(u.username)}')">Unban</button>`);
+      actions.push(`<button class="abtn" onclick="resetPass('${esc(u.username)}')">Password</button>`);
+      actions.push(`<button class="abtn" onclick="toggleRole('${esc(u.username)}','${u.role}')">${u.role === 'admin' ? 'Demote' : 'Promote'}</button>`);
+      if (u.username !== 'admin') actions.push(`<button class="abtn danger" onclick="del('${esc(u.username)}')">Delete</button>`);
+      return `<tr>
+        <td><span class="uname">${esc(u.username)}</span> ${u.discordOnly ? '<span class="pill user">discord</span>' : ''}</td>
+        <td><span class="pill ${u.role}">${u.role}</span></td>
+        <td>${discord}</td>
+        <td>${status}</td>
+        <td style="color:var(--muted);font-size:12px">${ago(u.lastSeen)}</td>
+        <td><div class="actions">${actions.join('')}</div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  /* --- actions --- */
+  function modal(html) { $('#modalBody').innerHTML = html; $('#modalBg').style.display = 'flex'; }
+  function closeModal() { $('#modalBg').style.display = 'none'; }
+  $('#modalBg').onclick = (e) => { if (e.target === $('#modalBg')) closeModal(); };
+
+  function banModal(username) {
+    modal(`<h3>Ban ${esc(username)}</h3>
+      <select id="banDur">
+        <option value="3600000">1 hour</option>
+        <option value="86400000" selected>1 day</option>
+        <option value="604800000">7 days</option>
+        <option value="2592000000">30 days</option>
+        <option value="permanent">Permanent</option>
+      </select>
+      <input id="banReason" placeholder="Reason (shown to user)" />
+      <div class="mrow">
+        <button class="abtn" onclick="closeModal()">Cancel</button>
+        <button class="abtn danger" onclick="doBan('${esc(username)}')">Ban user</button>
+      </div>`);
+  }
+  async function doBan(username) {
+    const v = $('#banDur').value;
+    const until = v === 'permanent' ? null : Date.now() + parseInt(v, 10);
+    try {
+      await api('/admin/api/ban', { username, until, reason: $('#banReason').value });
+      closeModal(); loadUsers();
+    } catch (e) { alert(e.message); }
+  }
+  async function unban(username) { try { await api('/admin/api/unban', { username }); loadUsers(); } catch (e) { alert(e.message); } }
+  async function del(username) {
+    if (!confirm(`Delete account "${username}" permanently?`)) return;
+    try { await api('/admin/api/delete', { username }); loadUsers(); } catch (e) { alert(e.message); }
+  }
+  async function toggleRole(username, role) {
+    try { await api('/admin/api/role', { username, role: role === 'admin' ? 'user' : 'admin' }); loadUsers(); } catch (e) { alert(e.message); }
+  }
+  function resetPass(username) {
+    modal(`<h3>Reset password — ${esc(username)}</h3>
+      <input id="np" type="text" placeholder="new password (4+ chars)" />
+      <div class="mrow">
+        <button class="abtn" onclick="closeModal()">Cancel</button>
+        <button class="abtn" onclick="doResetPass('${esc(username)}')">Set password</button>
+      </div>`);
+  }
+  async function doResetPass(username) {
+    try { await api('/admin/api/password', { username, password: $('#np').value }); closeModal(); alert('Password updated.'); }
+    catch (e) { alert(e.message); }
+  }
+  function openCreate() {
+    modal(`<h3>Create account</h3>
+      <input id="cu" placeholder="username (2-20 chars)" />
+      <input id="cp" type="text" placeholder="password (4+ chars)" />
+      <select id="cr"><option value="user">user</option><option value="admin">admin</option></select>
+      <div class="mrow">
+        <button class="abtn" onclick="closeModal()">Cancel</button>
+        <button class="abtn" onclick="doCreate()">Create</button>
+      </div>`);
+  }
+  async function doCreate() {
+    try { await api('/admin/api/create', { username: $('#cu').value.trim(), password: $('#cp').value, role: $('#cr').value }); closeModal(); loadUsers(); }
+    catch (e) { alert(e.message); }
+  }
+
+  /* --- live + logins --- */
+  async function loadOnline() {
+    try {
+      const rows = await api('/admin/api/online');
+      $('#stOnline').textContent = rows.length;
+      $('#onlineRows').innerHTML = rows.length ? rows.map(r =>
+        `<tr><td><b>${esc(r.username)}</b></td><td style="color:var(--muted)">${esc(r.ip || '—')}</td>
+         <td style="color:var(--muted);font-size:12px">${esc((r.ua || '').slice(0, 60))}</td>
+         <td style="color:var(--muted)">${ago(r.lastSeen)}</td></tr>`).join('')
+        : '<tr><td colspan="4" style="color:var(--muted)">Nobody online right now</td></tr>';
+    } catch (e) { $('#stOnline').textContent = '?'; }
+  }
+  async function loadLogins() {
+    try {
+      const rows = await api('/admin/api/logins');
+      $('#loginRows').innerHTML = rows.length ? rows.map(r =>
+        `<tr><td><b>${esc(r.user)}</b></td><td style="color:var(--muted)">${fmt(r.created)}</td>
+         <td style="color:var(--muted)">${esc(r.ip || '—')}</td>
+         <td style="color:var(--muted);font-size:12px">${esc((r.ua || '').slice(0, 60))}</td></tr>`).join('')
+        : '<tr><td colspan="4" style="color:var(--muted)">No logins recorded yet</td></tr>';
+    } catch (e) {}
+  }
+
+  /* --- tabs --- */
+  document.querySelectorAll('.tab[data-p]').forEach(t => {
+    t.onclick = () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+      document.querySelectorAll('.panel').forEach(x => x.classList.remove('on'));
+      t.classList.add('on');
+      $('#p-' + t.dataset.p).classList.add('on');
+    };
+  });
+  $('#filter').oninput = renderUsers;
+
+  /* init + auto refresh */
+  loadUsers(); loadOnline(); loadLogins();
+  setInterval(() => { loadOnline(); }, 15000);
+  setInterval(() => { loadUsers(); }, 30000);
+
+  /* discord rpc config */
+  fetch('/admin/api/discord-app').then(r => r.json()).then(d => { $('#rpcId').value = d.clientId || ''; }).catch(() => {});
+  async function saveRpc() {
+    try {
+      const r = await api('/admin/api/discord-app', { clientId: $('#rpcId').value.trim() });
+      alert('Saved. Rich Presence activates after the player restarts.');
+    } catch (e) { alert(e.message); }
+  }
+</script>
+</body>
+</html>

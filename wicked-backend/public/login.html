@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wicked Player — Sign in</title>
+<link rel="icon" type="image/svg+xml" href="/wicked-icon.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+<style>
+  :root { --accent: rgb(168, 85, 247); --bg: #07060d; --text: #f4f2ff; --muted: rgba(244,242,255,.55); --line: rgba(255,255,255,.09); }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Outfit', 'Segoe UI', sans-serif; background: var(--bg); color: var(--text);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .bg { position: fixed; inset: -80px; background:
+    radial-gradient(600px 400px at 20% 20%, rgba(168,85,247,.16), transparent 60%),
+    radial-gradient(700px 500px at 80% 80%, rgba(236,72,153,.12), transparent 60%); z-index: 0; }
+  .card {
+    position: relative; z-index: 1; width: min(420px, 92vw); background: rgba(255,255,255,.04);
+    border: 1px solid var(--line); border-radius: 24px; padding: 40px 36px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.5);
+  }
+  .logo { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+  .logo img { width: 46px; height: 46px; border-radius: 12px; }
+  .logo b { font-size: 20px; letter-spacing: .5px; }
+  .logo small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .field { margin-bottom: 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; letter-spacing: .4px; }
+  input {
+    width: 100%; background: rgba(255,255,255,.06); border: 1px solid var(--line); color: var(--text);
+    border-radius: 12px; padding: 13px 14px; font-size: 15px; outline: none; transition: border .15s;
+  }
+  input:focus { border-color: var(--accent); }
+  .btn {
+    width: 100%; padding: 14px; border-radius: 12px; border: none; cursor: pointer;
+    font-weight: 700; font-size: 15px; font-family: inherit; transition: transform .1s, opacity .15s;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn-primary { background: linear-gradient(135deg, #a855f7, #ec4899); color: #fff; margin-top: 6px; }
+  .btn-discord {
+    background: #5865F2; color: #fff; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 10px;
+  }
+  .btn-ghost { background: rgba(255,255,255,.06); color: var(--text); border: 1px solid var(--line); margin-top: 10px; }
+  .err { color: #fda4af; font-size: 13px; margin-top: 12px; min-height: 18px; }
+  .or { text-align: center; color: var(--muted); font-size: 12px; margin: 16px 0 4px; letter-spacing: 2px; }
+  .hidden { display: none; }
+  .foot { margin-top: 20px; text-align: center; color: var(--muted); font-size: 12px; }
+  a { color: #d8b4fe; }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="card">
+  <div class="logo">
+    <img src="/wicked-icon.svg" alt="logo" />
+    <div><b>WICKED PLAYER</b><small>ad-free music · FX · community</small></div>
+  </div>
+
+  <!-- LOGIN FORM -->
+  <div id="loginView">
+    <h1>Welcome back</h1>
+    <div class="sub">Sign in to start listening.</div>
+    <div class="field">
+      <label>USERNAME</label>
+      <input id="username" autocomplete="username" placeholder="your name" />
+    </div>
+    <div class="field">
+      <label>PASSWORD</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="••••••••" />
+    </div>
+    <button class="btn btn-primary" id="loginBtn">Sign in</button>
+    <div class="err" id="loginErr"></div>
+    <div class="or">— OR —</div>
+    <button class="btn btn-discord" id="discordBtn">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.058a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.099.246.198.373.292a.077.077 0 0 1-.006.127 12.3 12.3 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03M8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418m7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418"/></svg>
+      Continue with Discord
+    </button>
+    <button class="btn btn-ghost" id="showRegister">Create an account</button>
+  </div>
+
+  <!-- REGISTER FORM -->
+  <div id="registerView" class="hidden">
+    <h1>Create account</h1>
+    <div class="sub">Pick a name — friends will see it in the community.</div>
+    <div class="field">
+      <label>USERNAME</label>
+      <input id="rUsername" placeholder="2-20 chars" />
+    </div>
+    <div class="field">
+      <label>PASSWORD</label>
+      <input id="rPassword" type="password" placeholder="4+ characters" />
+    </div>
+    <button class="btn btn-primary" id="registerBtn">Create account</button>
+    <div class="err" id="regErr"></div>
+    <button class="btn btn-ghost" id="showLogin">Back to sign in</button>
+  </div>
+
+  <div class="foot">Wicked Player · <a href="/api/status">status</a></div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let discordConfigured = false;
+  fetch('/auth/discord/status').then(r => r.json()).then(d => {
+    discordConfigured = !!d.configured;
+    if (!discordConfigured) $('discordBtn').style.display = 'none';
+  }).catch(() => { $('discordBtn').style.display = 'none'; });
+
+  // already logged in? go straight in
+  fetch('/auth/me').then(r => r.json()).then(d => {
+    if (d.user && !d.banned) location.href = '/';
+  }).catch(() => {});
+
+  $('loginBtn').onclick = async () => {
+    $('loginErr').textContent = '';
+    const res = await fetch('/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('username').value.trim(), password: $('password').value }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) location.href = '/';
+    else $('loginErr').textContent = d.error || 'Login failed';
+  };
+  $('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+
+  $('registerBtn').onclick = async () => {
+    $('regErr').textContent = '';
+    const res = await fetch('/auth/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('rUsername').value.trim(), password: $('rPassword').value }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) location.href = '/';
+    else $('regErr').textContent = d.error || 'Registration failed';
+  };
+  $('rPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('registerBtn').click(); });
+
+  $('showRegister').onclick = () => { $('loginView').classList.add('hidden'); $('registerView').classList.remove('hidden'); };
+  $('showLogin').onclick = () => { $('registerView').classList.add('hidden'); $('loginView').classList.remove('hidden'); };
+  $('discordBtn').onclick = () => { location.href = '/auth/discord/start'; };
+</script>
+</body>
+</html>

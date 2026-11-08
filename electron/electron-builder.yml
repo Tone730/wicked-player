@@ -1,0 +1,54 @@
+appId: com.wick.dev.wickedplayer
+productName: Wicked Player
+copyright: Wicked Player 2026
+
+directories:
+  output: dist
+  buildResources: .
+
+npmRebuild: false
+
+files:
+  - main.js
+  - preload.js
+  - icon.png
+
+extraResources:
+  - from: ../wicked-frontend/dist
+    to: app-ui
+  - from: ../wicked-backend/server.js
+    to: backend/server.js
+  - from: ../wicked-backend/community.js
+    to: backend/community.js
+  - from: ../wicked-backend/auth.js
+    to: backend/auth.js
+  - from: ../wicked-backend/.env
+    to: backend/.env
+  - from: ../wicked-backend/package.json
+    to: backend/package.json
+  - from: ../wicked-backend/public
+    to: backend/public
+  - from: ../wicked-backend/node_modules
+    to: backend/node_modules
+
+protocols:
+  - name: Wicked Player
+    schemes:
+      - wicked
+
+win:
+  target:
+    - nsis
+  icon: icon.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  uninstallDisplayName: Wicked Player
+
+publish:
+  provider: github
+  owner: Tone730
+  repo: wicked-player

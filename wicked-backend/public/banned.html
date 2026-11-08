@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Wicked Player — Access restricted</title>
+<link rel="icon" type="image/svg+xml" href="/wicked-icon.svg" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Outfit','Segoe UI',sans-serif; background: #07060d; color: #f4f2ff;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .card { text-align: center; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.09);
+    border-radius: 24px; padding: 48px 44px; max-width: 460px; }
+  .icon { font-size: 52px; margin-bottom: 16px; }
+  h1 { font-size: 24px; margin-bottom: 10px; }
+  .reason { color: rgba(244,242,255,.6); font-size: 15px; line-height: 1.5; margin-bottom: 22px; }
+  .btn { display: inline-block; padding: 12px 26px; border-radius: 12px; text-decoration: none;
+    background: rgba(255,255,255,.07); color: #f4f2ff; border: 1px solid rgba(255,255,255,.12); font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">⛔</div>
+    <h1>Access restricted</h1>
+    <div class="reason" id="reason">__REASON__</div>
+    <a class="btn" href="/">Back to sign in</a>
+  </div>
+  <script>
+    // clear local session state
+    fetch('/auth/logout', { method: 'POST' }).catch(() => {});
+  </script>
+</body>
+</html>

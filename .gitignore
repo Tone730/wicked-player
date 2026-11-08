@@ -1,0 +1,19 @@
+# other projects (never touch)
+/*
+!/.gitignore
+!/README.md
+!/wicked-backend/
+!/wicked-frontend/
+!/electron/
+
+# secrets & user data
+.env
+**/.env
+**/data/
+**/media/
+**/node_modules/
+**/dist/
+*.log
+*.lock
+package-lock.json
+wicked-backend/package-lock.json
