@@ -147,13 +147,13 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
     },
   });
 
-  win.on('minimize', (e) => {
-    if (win.__mini || win.__allowMin) return;
-    e.preventDefault();
-    win.webContents.send('minimode', true);
+  win.on('minimize', () => {
+    // normal minimize — the overlay window keeps running on top of everything
+    try { if (overlay && overlay.isVisible()) { /* overlay stays */ } } catch {}
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -192,25 +192,38 @@ function createOverlay() {
     skipTaskbar: true,
     resizable: true,
     hasShadow: false,
+    show: false,
     webPreferences: {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
     },
   });
   overlay.setAlwaysOnTop(true, 'screen-saver');
   overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlay.loadURL('http://localhost:5000/?wpoverlay=1');
-  overlay.hide();
   overlay.on('closed', () => { overlay = null; });
 }
+
+function showOverlay() {
+  const show = () => {
+    try {
+      overlay.showInactive();
+      overlay.setAlwaysOnTop(true, 'screen-saver');
+      overlay.moveTop();
+    } catch {}
+  };
+  // load fresh each time it's shown (fresh skin + state, no stale cache)
+  overlay.loadURL('http://localhost:5000/?wpoverlay=1&t=' + Date.now())
+    .then(show)
+    .catch(show);
+}
+
 function toggleOverlay() {
+  if (overlay && overlay.isVisible()) { overlay.hide(); return; }
   if (!overlay) createOverlay();
   if (!overlay) return;
-  if (overlay.isVisible()) overlay.hide();
-  else {
-    overlay.showInactive();
-    overlay.setAlwaysOnTop(true, 'screen-saver');
-  }
+  // only show once the backend can actually serve the overlay UI
+  ensureBackend().then(() => showOverlay());
 }
 
 /* ---------- IPC ---------- */
@@ -224,7 +237,7 @@ ipcMain.on('overlay:cmd', (_e, cmd) => {
   try { win?.webContents.send('overlay:cmd', cmd); } catch {}
 });
 ipcMain.on('overlay:ready', () => {
-  try { overlay?.webContents.send('overlay:hello', { ok: true }); } catch {}
+  try { win?.webContents.send('overlay:hello', { ok: true }); } catch {}
 });
 ipcMain.handle('overlay:ping', () => true);
 
@@ -266,7 +279,6 @@ ipcMain.handle('updates:install', () => {
 /* ---------- lifecycle ---------- */
 app.whenReady().then(() => {
   createWindow();
-  createOverlay();
   setupUpdater();
   registerHotkeys();
 });
