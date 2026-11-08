@@ -1001,6 +1001,7 @@ app.get('/api/spotify/liked', async (req, res) => {
   /* SPA fallback - also gated */
   app.use((req, res, next) => {
     if (req.method === 'GET' && !req.path.startsWith('/socket.io') && !req.path.startsWith('/api')) {
+      if (req.query.wpoverlay === '1') return res.sendFile(path.join(UI_DIR, 'index.html'));
       const u = auth.userFromReq(req);
       if (!u) return res.redirect('/');
       const ban = auth.isBannedNow(u);

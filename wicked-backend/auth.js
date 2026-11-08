@@ -517,6 +517,11 @@ const gate = (req, res, next) => {
    logged in = the app UI with the user injected */
 function gateHome(sendIndex) {
   return (req, res) => {
+    if (req.query.wpoverlay === '1') {
+      const html0 = fs.readFileSync(sendIndex(), 'utf8');
+      res.setHeader('Cache-Control', 'no-cache');
+      return res.type('html').send(html0);
+    }
     const u = userFromReq(req);
     if (!u) return serveFile(res, 'login.html');
     const ban = isBannedNow(u.account);
