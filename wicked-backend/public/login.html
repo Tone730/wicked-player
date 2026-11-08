@@ -100,12 +100,35 @@
     <button class="btn btn-ghost" id="showLogin">Back to sign in</button>
   </div>
 
-  <div class="foot">Wicked Player · <a href="/api/status">status</a></div>
+  <div class="foot">Wicked Player · <a href="/api/status">status</a> · <a href="#" id="serverLink">connect to a server</a></div>
 </div>
 
 <script>
   const $ = (id) => document.getElementById(id);
   let discordConfigured = false;
+
+  // ?useLocal=1 → clear hosted-server preference on THIS local backend
+  if (new URLSearchParams(location.search).get('useLocal') === '1') {
+    fetch('/local/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ homeServer: null }) })
+      .catch(() => {});
+  }
+
+  $('serverLink').onclick = (e) => {
+    e.preventDefault();
+    const url = prompt('Connect to a hosted server\\n(e.g. http://192.168.1.50:5000 or https://music.yourdomain.com)\\nLeave empty to use this device:', localStorage.getItem('wp-server') || '');
+    if (url === null) return;
+    const trimmed = (url || '').trim();
+    if (!trimmed) { localStorage.removeItem('wp-server'); return; }
+    localStorage.setItem('wp-server', trimmed);
+    fetch('/local/prefs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ homeServer: trimmed }),
+    }).finally(() => {
+      const target = trimmed.startsWith('http') ? trimmed : 'http://' + trimmed;
+      location.href = target + '/';
+    });
+  };
+
   fetch('/auth/discord/status').then(r => r.json()).then(d => {
     discordConfigured = !!d.configured;
     if (!discordConfigured) $('discordBtn').style.display = 'none';

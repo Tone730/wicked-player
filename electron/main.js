@@ -51,6 +51,25 @@ app.on('quit', () => {
   try { if (backendProc) backendProc.kill(); } catch {}
 });
 
+/* home server: local by default, or a hosted server set via login page / prefs */
+function fetchHomeServer() {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:5000/local/prefs', { timeout: 3000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => {
+        try {
+          const prefs = JSON.parse(body);
+          if (prefs.homeServer && /^https?:\/\//.test(prefs.homeServer)) return resolve(prefs.homeServer);
+        } catch {}
+        resolve('http://localhost:5000');
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve('http://localhost:5000'); });
+    req.on('error', () => resolve('http://localhost:5000'));
+  });
+}
+
 /* ---------- discord rich presence ---------- */
 let rpc = null, rpcReady = false, rpcClientId = null;
 
@@ -145,13 +164,16 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => { uiLoaded = true; });
   win.on('closed', () => { win = null; });
 
-  /* load through the backend's login gate */
+  /* load through the backend's login gate — or a remote server if set
+     (hosted mode: friends point their app at the host's server) */
   ensureBackend().then(() => {
     initDiscord();
-    win.loadURL('http://localhost:5000/');
-    setTimeout(() => {
-      if (!uiLoaded) { try { shell.openExternal('http://localhost:5000'); } catch {} }
-    }, 15000);
+    fetchHomeServer().then((homeUrl) => {
+      win.loadURL(homeUrl + '/');
+      setTimeout(() => {
+        if (!uiLoaded) { try { shell.openExternal(homeUrl); } catch {} }
+      }, 15000);
+    });
   });
 }
 

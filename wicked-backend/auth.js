@@ -227,6 +227,25 @@ router.post('/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+/* change own password (session required; discord-only accounts set initial password) */
+router.post('/auth/change-password', (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: 'Login required' });
+  const next = String(req.body.next || '');
+  if (next.length < 4) return res.status(400).json({ error: 'New password must be 4+ characters' });
+  const acc = u.account;
+  if (!acc.discordOnly && acc.passHash) {
+    const cur = String(req.body.current || '');
+    if (!verifyPassword(cur, acc.salt, acc.passHash)) {
+      return res.status(401).json({ error: 'Current password is wrong' });
+    }
+  }
+  const { salt, hash } = hashPassword(next);
+  acc.salt = salt; acc.passHash = hash; acc.discordOnly = false;
+  saveUsers();
+  res.json({ ok: true });
+});
+
 /* discord: start oauth */
 router.get('/auth/discord/start', (req, res) => {
   if (!DISCORD.configured) return res.status(501).send('Discord login is not configured on this server yet.');
@@ -279,6 +298,26 @@ router.get('/auth/discord/callback', async (req, res) => {
 
 router.get('/auth/discord/status', (_req, res) => {
   res.json({ configured: DISCORD.configured });
+});
+
+/* local prefs (desktop app home server). Local-only by nature: the desktop
+   app reads it from its own bundled backend to decide which server to open. */
+const LOCAL_PREFS_FILE = path.join(DATA_DIR, 'local-prefs.json');
+router.get('/local/prefs', (_req, res) => {
+  try { res.json(JSON.parse(fs.readFileSync(LOCAL_PREFS_FILE, 'utf8'))); }
+  catch { res.json({ homeServer: null }); }
+});
+router.post('/local/prefs', (req, res) => {
+  let homeServer = req.body.homeServer || null;
+  if (homeServer) {
+    homeServer = String(homeServer).trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//.test(homeServer)) homeServer = 'http://' + homeServer;
+    try { const u = new URL(homeServer); if (!u.hostname) throw 0; } catch {
+      return res.status(400).json({ error: 'invalid server url' });
+    }
+  }
+  fs.writeFileSync(LOCAL_PREFS_FILE, JSON.stringify({ homeServer }, null, 2));
+  res.json({ ok: true, homeServer });
 });
 
 /* public: who is online right now (usernames only, last 5 min) */
@@ -438,7 +477,7 @@ const PROTECTED_PREFIXES = [
   '/import', '/library', '/upload', '/api/', '/genre-art-refresh', '/discord/say',
 ];
 function isPublicPath(p) {
-  if (p === '/api/online-users' || p === '/genre-art') return true;
+  if (p === '/api/online-users' || p === '/genre-art' || p.startsWith('/local/')) return true;
   if (PUBLIC_PREFIXES.some((pre) => p === pre || p.startsWith(pre))) return true;
   return false;
 }

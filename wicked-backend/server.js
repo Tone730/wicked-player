@@ -962,7 +962,10 @@ app.get('/api/spotify/liked', async (req, res) => {
   ].filter(Boolean);
   const UI_DIR = UI_CANDIDATES.find((c) => fs.existsSync(path.join(c, 'index.html'))) || UI_CANDIDATES[0];
   app.use(express.static(UI_DIR, { index: false, maxAge: '1h', setHeaders: (res, p) => {
-    if (p.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+    const f = path.basename(p).toLowerCase();
+    if (p.endsWith('.html') || f.startsWith('enhance.') || f.startsWith('account-chip.')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
   } }));
 
   /* genre cover art for the genres page (public - just image urls) */
