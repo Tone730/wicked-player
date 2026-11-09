@@ -147,7 +147,6 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      backgroundThrottling: false,
     },
   });
 
@@ -210,6 +209,7 @@ function showOverlay() {
       overlay.showInactive();
       overlay.setAlwaysOnTop(true, 'screen-saver');
       overlay.moveTop();
+      startStateTimer();
     } catch {}
   };
   // load fresh each time it's shown (fresh skin + state, no stale cache)
@@ -229,16 +229,93 @@ function toggleOverlay() {
 /* ---------- IPC ---------- */
 ipcMain.on('presence', (_e, { track, playing }) => setPresence(track, playing));
 
-/* overlay plumbing */
-ipcMain.on('overlay:state', (_e, state) => {
-  try { overlay?.webContents.send('overlay:state', state); } catch {}
-});
-ipcMain.on('overlay:cmd', (_e, cmd) => {
-  try { win?.webContents.send('overlay:cmd', cmd); } catch {}
-});
-ipcMain.on('overlay:ready', () => {
-  try { win?.webContents.send('overlay:hello', { ok: true }); } catch {}
-});
+/* ---------- overlay plumbing: main process drives everything ----------
+   State is polled straight from the main window's audio element via
+   executeJavaScript (works while minimized), and overlay commands are
+   executed the same way. No renderer-to-renderer relay, no timers in
+   the game's way. */
+let stateTimer = null;
+let lastPresenceAt = 0;
+
+function readPlayerState() {
+  return win?.webContents
+    ?.executeJavaScript(
+      `(() => {
+        const a = document.querySelector('audio');
+        const bar = document.querySelector('footer, [class*="foobar"], [class*="bar-center"]');
+        const lines = (bar ? (bar.innerText || '') : '').split('\n').map(s => s.trim()).filter(Boolean);
+        let art = null;
+        const img = document.querySelector('footer img, [class*="track-art"] img');
+        if (img) art = img.src;
+        else {
+          const el = document.querySelector('[class*="track-art"] [style*="background"]');
+          if (el) { const m = /url\(["']?([^"')]+)/.exec(el.style.backgroundImage || ''); if (m) art = m[1]; }
+        }
+        return JSON.stringify({
+          playing: a ? !a.paused : false,
+          title: lines[0] || '',
+          artist: lines[1] || '',
+          art: art,
+          pos: a ? a.currentTime : 0,
+          dur: a ? (a.duration || 0) : 0
+        });
+      })()`,
+      false
+    )
+    .then((r) => { try { return JSON.parse(r); } catch { return null; } })
+    .catch(() => null);
+}
+
+async function pushOverlayState() {
+  if (!overlay || !overlay.isVisible() || !win) return;
+  const st = await readPlayerState();
+  if (!st) return;
+  try { overlay.webContents.send('overlay:state', st); } catch {}
+  // discord presence rides the same poll (2s refresh)
+  if (st.title && Date.now() - lastPresenceAt > 2000) {
+    lastPresenceAt = Date.now();
+    setPresence({ name: st.title, artist: st.artist, album: '', art: st.art, elapsed: st.pos }, st.playing);
+  }
+}
+
+function startStateTimer() {
+  if (stateTimer) return;
+  stateTimer = setInterval(() => { pushOverlayState().catch(() => {}); }, 500);
+}
+
+function execDriver(js) {
+  if (!win) return;
+  win.webContents.executeJavaScript(js, false).catch(() => {});
+}
+
+function runOverlayCmd(cmd) {
+  const c = String(cmd.type || '');
+  if (c === 'toggle') {
+    execDriver(
+      `(() => { const a = document.querySelector('audio');
+        if (a) { a.paused ? a.play().catch(()=>{}) : a.pause(); }
+        else { const bs=[...document.querySelectorAll('button')];
+               const pl=bs.find(b=>/^\s*(play|pause)\s*$/i.test(b.getAttribute('aria-label')||b.title||b.textContent||''));
+               if(pl) pl.click(); } })()`
+    );
+  } else if (c === 'play') {
+    execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.play().catch(()=>{}); })()`);
+  } else if (c === 'pause') {
+    execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.pause(); })()`);
+  } else if (c === 'next') {
+    execDriver(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.title||'')==='Next'); if(b) b.click(); })()`);
+  } else if (c === 'prev') {
+    execDriver(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.title||'')==='Previous'); if(b) b.click(); })()`);
+  } else if (c === 'seek') {
+    const v = Number(cmd.value || 0);
+    execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.currentTime=${v}; })()`);
+  } else if (c === 'close-overlay') {
+    toggleOverlay();
+  }
+}
+
+ipcMain.on('overlay:cmd', (_e, cmd) => { runOverlayCmd(cmd); });
+ipcMain.on('overlay:ready', () => { startStateTimer(); pushOverlayState().catch(() => {}); });
 ipcMain.handle('overlay:ping', () => true);
 
 ipcMain.on('winctl', (_e, action) => {
