@@ -30,6 +30,10 @@ extraResources:
     to: backend/public
   - from: ../wicked-backend/node_modules
     to: backend/node_modules
+  - from: ../wicked-backend/.env
+    to: backend/.env
+  - from: ../wicked-backend/data/discord-app.json
+    to: backend/data/discord-app.json
 
 protocols:
   - name: Wicked Player

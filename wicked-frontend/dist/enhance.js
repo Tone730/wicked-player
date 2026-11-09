@@ -19,11 +19,32 @@
 
   /* ---- 0. auth guard: never show "backend asleep" when it's just a logout ---- */
   const _origFetch = window.fetch;
+
+  // stream resolve cache: instant re-play of tracks you already loaded
+  const STREAM_KEY = 'wp-stream-cache';
+  const streamMem = (() => { try { return JSON.parse(sessionStorage.getItem(STREAM_KEY) || '{}'); } catch { return {}; } })();
+  const saveStream = () => { try { sessionStorage.setItem(STREAM_KEY, JSON.stringify(streamMem)); } catch {} };
+
   window.fetch = function (...args) {
+    let url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+    const sm = /\?q=([^&]+)/.exec(url);
+    if (url.includes('/stream?q=') && sm) {
+      const key = decodeURIComponent(sm[1]).toLowerCase();
+      const hit = streamMem[key];
+      if (hit && Date.now() - hit.at < 20 * 60 * 1000) {
+        return Promise.resolve(new Response(JSON.stringify(hit.data), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return _origFetch.apply(this, args).then((res) => {
+        if (res.ok) {
+          res.clone().json().then((data) => { streamMem[key] = { at: Date.now(), data }; saveStream(); }).catch(() => {});
+        }
+        return res;
+      });
+    }
     return _origFetch.apply(this, args).then((res) => {
       if (res.status === 401 && !isOverlay) {
         res.clone().json().then((d) => {
-          if (d && d.auth === true && d.error === 'Login required') {
+          if (d && d.auth === true && d.error === 'Login required' && !document.getElementById('username')) {
             location.href = '/';
           }
         }).catch(() => {});

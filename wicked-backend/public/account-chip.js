@@ -16,7 +16,7 @@
 
   const css = document.createElement('style');
   css.textContent = `
-    #wp-chip { position: fixed; top: 10px; right: 12px; z-index: 9999; display: flex; align-items: center; gap: 8px;
+    #wp-chip { position: fixed; bottom: 86px; right: 12px; z-index: 9999; display: flex; align-items: center; gap: 8px;
       background: rgba(18,16,31,.85); border: 1px solid rgba(255,255,255,.1); border-radius: 999px;
       padding: 6px 8px 6px 14px; font-family: 'Outfit','Segoe UI',sans-serif; font-size: 12px; color: #f4f2ff;
       backdrop-filter: blur(8px); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
