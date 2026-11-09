@@ -34,7 +34,32 @@ For i = 1 To 3
     WScript.Sleep 1500
 Next
 
-If ok Then WScript.Quit
+If ok Then
+    ' backend is up - now make sure the PUBLIC tunnel is up too
+    Dim pub : pub = False
+    Dim h2
+    Set h2 = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    If Not h2 Is Nothing Then
+        h2.setTimeouts 6000, 6000, 6000, 6000
+        h2.Open "GET", "https://wickedplayer.dev/api/status", False
+        h2.Send
+        If Err.Number = 0 Then
+            If h2.status = 200 Then pub = True
+        End If
+        Err.Clear
+        Set h2 = Nothing
+    End If
+    If Not pub Then
+        LogLine "watchdog: public tunnel down - bouncing tunnel task"
+        Dim sh3
+        Set sh3 = CreateObject("WScript.Shell")
+        sh3.Run "schtasks /end /tn ""WickedPlayer Stable Tunnel"" /f", 0, True
+        WScript.Sleep 1500
+        sh3.Run "schtasks /run /tn ""WickedPlayer Stable Tunnel""", 0, True
+        Set sh3 = Nothing
+    End If
+    WScript.Quit
+End If
 
 LogLine "watchdog: app not answering - bouncing backend task"
 sh.Run "schtasks /end /tn ""WickedPlayer Backend"" /f", 0, True
