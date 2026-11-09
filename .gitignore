@@ -13,6 +13,7 @@
 **/media/
 **/node_modules/
 **/dist/
+!wicked-frontend/dist/**
 *.log
 *.lock
 package-lock.json
