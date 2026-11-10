@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('wickedUpdates', {
     return () => ipcRenderer.removeListener('overlay:cmd', h);
   },
   overlayReady: () => ipcRenderer.send('overlay:ready'),
+  onOverlaySettings: (cb) => { const h = (_e, d) => { try { cb(d); } catch {} }; ipcRenderer.on('overlay:settings', h); return () => ipcRenderer.removeListener('overlay:settings', h); },
   onOverlayHello: (cb) => {
     const h = (_e, d) => { try { cb(d); } catch {} };
     ipcRenderer.on('overlay:hello', h);
