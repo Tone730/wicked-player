@@ -454,7 +454,7 @@ app.post('/api/reward/issue', async (req, res) => {
   const d = await readRewards();
   const mine = d.issued.filter((r) => r.user === user);
   const last = mine.sort((a, b) => b.at - a.at)[0];
-  const lastWait = last?.waitMs || 10 * 60 * 1000;
+  const lastWait = last?.waitMs || 50 * 60 * 1000;
   if (last && now - last.at < lastWait) return res.json({ none: true, waitMs: lastWait - (now - last.at) });
   const type = rollReward();
   const hours = Math.max(0, Math.min(1000, Number(req.body.minutes) || 0)) / 60;
@@ -474,10 +474,19 @@ app.post('/api/reward/issue', async (req, res) => {
   }
   d.issued.push(rw);
   if (d.issued.length > 500) d.issued = d.issued.slice(-500);
-  rw.nextWaitMs = 8 * 60 * 1000 + Math.floor(Math.random() * 17 * 60 * 1000);
+  rw.nextWaitMs = 50 * 60 * 1000 + Math.floor(Math.random() * 70 * 60 * 1000);
   await writeRewards(d);
   res.json(rw);
 });
+app.get('/api/config/discord-invite', (_req, res) => {
+  let invite = process.env.DISCORD_INVITE || null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'discord-app.json'), 'utf8'));
+    if (cfg.invite) invite = cfg.invite;
+  } catch {}
+  res.json({ invite });
+});
+
 app.get('/api/rewards', async (req, res) => {
   const user = String(req.query.user || '').slice(0, 40);
   const d = await readRewards();

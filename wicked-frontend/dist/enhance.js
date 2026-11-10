@@ -167,6 +167,27 @@
     });
   }
 
+  /* ---- gift claim: open OUR discord invite, not the old one ---- */
+  let wpInvite = null;
+  fetch('/api/config/discord-invite').then((r) => r.json()).then((d) => { if (d.invite) wpInvite = d.invite; }).catch(() => {});
+  if (isDesktop || location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+    setInterval(() => {
+      try {
+        const btn = [...document.querySelectorAll('button')].find((b) => /claim on discord/i.test(b.textContent || ''));
+        if (btn && !btn.__wpInviteWired) {
+          btn.__wpInviteWired = true;
+          btn.addEventListener('click', (e) => {
+            e.stopImmediatePropagation();
+            const card = btn.closest('div') && btn.closest('div').parentElement ? btn.closest('div').parentElement : btn.parentElement;
+            const codeMatch = card ? (card.innerText.match(/WK-[A-Z2-9]{6}/) || [null])[0] : null;
+            if (codeMatch) { try { navigator.clipboard.writeText(codeMatch); } catch {} }
+            if (wpInvite) { window.open(wpInvite, '_blank'); }
+          }, true);
+        }
+      } catch {}
+    }, 2000);
+  }
+
   /* ---- rewire the app's in-window "Mini player overlay" button to the true overlay ---- */
   if (isDesktop) {
     setInterval(() => {

@@ -82,6 +82,13 @@
       </div>
       <button class="abtn" onclick="saveRpc()">Save & activate</button>
     </div>
+    <div class="toolbar" style="align-items:flex-end;">
+      <div style="flex:1;min-width:260px;">
+        <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:1px;">DISCORD SERVER INVITE - where users claim gift codes</label>
+        <input class="searchbox" id="rpcInvite" placeholder="https://discord.gg/yourcode" />
+      </div>
+      <button class="abtn" onclick="saveRpc()">Save</button>
+    </div>
     <div style="font-size:12px;color:var(--muted);">Create a free app at <a href="https://discord.com/developers/applications" target="_blank" style="color:#d8b4fe;">discord.com/developers/applications</a> → copy the Application ID → paste here. In the app's settings enable "Art Assets" so album art shows in Discord. Restart the player after saving.</div>
   </div>
 
@@ -278,10 +285,10 @@
   setInterval(() => { loadUsers(); }, 30000);
 
   /* discord rpc config */
-  fetch('/admin/api/discord-app').then(r => r.json()).then(d => { $('#rpcId').value = d.clientId || ''; }).catch(() => {});
+  fetch('/admin/api/discord-app').then(r => r.json()).then(d => { $('#rpcId').value = d.clientId || ''; $('#rpcInvite').value = d.invite || ''; }).catch(() => {});
   async function saveRpc() {
     try {
-      const r = await api('/admin/api/discord-app', { clientId: $('#rpcId').value.trim() });
+      const r = await api('/admin/api/discord-app', { clientId: $('#rpcId').value.trim(), invite: $('#rpcInvite').value.trim() });
       alert('Saved. Rich Presence activates after the player restarts.');
     } catch (e) { alert(e.message); }
   }

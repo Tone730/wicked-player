@@ -334,17 +334,31 @@ router.get('/api/online-users', (_req, res) => {
 const DISCORD_APP_FILE = path.join(DATA_DIR, 'discord-app.json');
 router.get('/admin/api/discord-app', requireAdmin, (_req, res) => {
   let clientId = process.env.DISCORD_CLIENT_ID || null;
+  let invite = process.env.DISCORD_INVITE || null;
   try {
     const cfg = JSON.parse(fs.readFileSync(DISCORD_APP_FILE, 'utf8'));
     if (cfg.clientId) clientId = cfg.clientId;
+    if (cfg.invite) invite = cfg.invite;
   } catch {}
-  res.json({ clientId });
+  res.json({ clientId, invite });
 });
 router.post('/admin/api/discord-app', requireAdmin, (req, res) => {
   const clientId = String(req.body.clientId || '').trim();
-  if (!/^[0-9]{15,25}$/.test(clientId)) return res.status(400).json({ error: 'Discord application ID must be 15-25 digits' });
-  fs.writeFileSync(DISCORD_APP_FILE, JSON.stringify({ clientId }, null, 2));
-  res.json({ ok: true, clientId, note: 'Restart the Wicked Player app to activate Rich Presence.' });
+  let invite = String(req.body.invite || '').trim();
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(DISCORD_APP_FILE, 'utf8')); } catch {}
+  if (clientId) {
+    if (!/^[0-9]{15,25}$/.test(clientId)) return res.status(400).json({ error: 'Discord application ID must be 15-25 digits' });
+    cfg.clientId = clientId;
+  }
+  if (invite) {
+    if (!/^https:\/\/discord\.gg\/[A-Za-z0-9-]+$/.test(invite) && !/^https:\/\/discord\.com\/invite\/[A-Za-z0-9-]+$/.test(invite)) {
+      return res.status(400).json({ error: 'Invite must look like https://discord.gg/yourcode' });
+    }
+    cfg.invite = invite;
+  }
+  fs.writeFileSync(DISCORD_APP_FILE, JSON.stringify(cfg, null, 2));
+  res.json({ ok: true, clientId: cfg.clientId || null, invite: cfg.invite || null, note: cfg.clientId ? 'Restart the app to activate Rich Presence.' : undefined });
 });
 
 /* ============================================================
@@ -477,7 +491,7 @@ const PROTECTED_PREFIXES = [
   '/import', '/library', '/upload', '/api/', '/genre-art-refresh', '/discord/say',
 ];
 function isPublicPath(p) {
-  if (p === '/api/online-users' || p === '/genre-art' || p.startsWith('/local/')) return true;
+  if (p === '/api/online-users' || p === '/genre-art' || p.startsWith('/local/') || p === '/api/config/discord-invite') return true;
   if (PUBLIC_PREFIXES.some((pre) => p === pre || p.startsWith(pre))) return true;
   return false;
 }
