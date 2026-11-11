@@ -338,6 +338,92 @@
   }
   window.__wpGiftModal = giftModal;
 
+  /* ============ 6. BACKGROUND CUSTOMIZATION ============ */
+  var BG_KEY = "wp-background";
+  function applyBackground(cfg) {
+    if (!cfg || cfg === "default") { document.body.style.background = ""; var bg = document.querySelector(".bg-art"); if (bg) { bg.style.opacity = ""; bg.style.filter = ""; } return; }
+    if (cfg.type === "solid") { document.body.style.background = cfg.value; var bg = document.querySelector(".bg-art"); if (bg) bg.style.opacity = "0"; }
+    else if (cfg.type === "image") { document.body.style.background = "#07060d url(\"" + cfg.value + "\") center/cover fixed no-repeat"; var bg = document.querySelector(".bg-art"); if (bg) bg.style.opacity = "0.15"; }
+  }
+  function loadBackground() { try { var cfg = JSON.parse(localStorage.getItem(BG_KEY) || "null"); if (cfg) applyBackground(cfg); } catch(e) {} }
+  loadBackground();
+  function bgPanel() {
+    var old = document.getElementById("wp-bg-panel"); if (old) { old.remove(); return; }
+    var box = document.createElement("div"); box.id = "wp-bg-panel";
+    box.style.cssText = "position:fixed;bottom:210px;right:12px;z-index:10001;background:rgba(18,16,31,.97);border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:16px;width:280px;font-family:inherit;box-shadow:0 14px 40px rgba(0,0,0,.5);";
+    box.innerHTML = '<div style="font-weight:800;font-size:13px;margin-bottom:12px;color:#d8b4fe">&#127912; Background</div><label style="display:block;font-size:11px;color:rgba(244,242,255,.5);margin-bottom:4px">SOLID COLOR</label><input id="wpBgColor" type="color" value="#07060d" style="width:100%;height:36px;border:none;border-radius:8px;cursor:pointer;margin-bottom:10px"><label style="display:block;font-size:11px;color:rgba(244,242,255,.5);margin-bottom:4px">IMAGE URL</label><input id="wpBgUrl" placeholder="https://... image URL" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:6px"><input id="wpBgFile" type="file" accept="image/*" style="width:100%;font-size:11px;margin-bottom:10px"><div style="display:flex;gap:6px"><button id="wpBgApply" style="flex:1;background:linear-gradient(135deg,#a855f7,#ec4899);border:none;color:#fff;border-radius:8px;padding:8px;font-weight:700;cursor:pointer">Apply</button><button id="wpBgReset" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:8px;padding:8px 14px;cursor:pointer">Reset</button></div><button id="wpBgX" style="position:absolute;top:8px;right:10px;background:none;border:none;color:rgba(244,242,255,.5);cursor:pointer;font-size:14px">&#10005;</button>';
+    document.body.appendChild(box);
+    box.querySelector("#wpBgX").onclick = function() { box.remove(); };
+    box.querySelector("#wpBgApply").onclick = function() { var c = box.querySelector("#wpBgColor").value; var u = box.querySelector("#wpBgUrl").value.trim(); var cfg = u ? {type:"image",value:u} : {type:"solid",value:c}; localStorage.setItem(BG_KEY, JSON.stringify(cfg)); applyBackground(cfg); };
+    box.querySelector("#wpBgColor").oninput = function() { var cfg = {type:"solid",value:this.value}; localStorage.setItem(BG_KEY, JSON.stringify(cfg)); applyBackground(cfg); };
+    box.querySelector("#wpBgFile").onchange = function() { var f = this.files[0]; if (!f) return; var fd = new FormData(); fd.append("file", f); var x = new XMLHttpRequest(); x.open("POST", "/upload"); x.onload = function() { try { var d = JSON.parse(x.responseText); if (d.url) { box.querySelector("#wpBgUrl").value = location.origin + d.url; var cfg = {type:"image",value:location.origin+d.url}; localStorage.setItem(BG_KEY, JSON.stringify(cfg)); applyBackground(cfg); } } catch(e) {} }; x.send(f); };
+    box.querySelector("#wpBgReset").onclick = function() { localStorage.removeItem(BG_KEY); applyBackground("default"); box.remove(); };
+  }
+  /* ---- 7. EMPTY STATES ---- */
+  setInterval(function() {
+    var root = document.getElementById("root"); if (!root) return;
+    var text = root.innerText || "";
+    if (text.indexOf("Nobody else online yet") !== -1) {
+      var els = root.querySelectorAll("*");
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].children.length === 0 && els[i].textContent.indexOf("Nobody else") !== -1 && els[i].parentElement && !els[i].parentElement.querySelector(".wp-empty-help")) {
+          var d = document.createElement("div"); d.className = "wp-empty-help"; d.style.cssText = "font-size:12px;color:rgba(244,242,255,.4);margin-top:8px;line-height:1.5;"; d.innerHTML = "Invite friends to download Wicked Player and create accounts. They will appear here when online."; els[i].parentElement.appendChild(d); break;
+        }
+      }
+    }
+  }, 4000);
+  /* ---- 8. PREMIUM MESSAGING ---- */
+  var PF = { Cinematic: "Cinematic soundboard is Premium. Free packs: Classic, 8-Bit, Percussion.", Horror: "Horror soundboard is Premium.", shimmer: "Shimmer FX is Premium.", rainbow: "Rainbow FX is Premium.", animated: "Animated banners are Premium.", tag: "Custom tags are Premium.", glow: "Tag glow is Premium." };
+  var po = new MutationObserver(function() {
+    document.querySelectorAll('[class*="hint"], [class*="premium"]').forEach(function(el) {
+      if (el.dataset.wpF) return; var t = el.textContent || "";
+      if (t.indexOf("is Premium") !== -1 || t.indexOf("Premium feature") !== -1 || t.indexOf("Unlock with") !== -1) {
+        el.dataset.wpF = "1";
+        var par = el.closest('[class*="preset"], [class*="pack"], [class*="tag"], [class*="banner"]');
+        var ctx = par ? (par.textContent || "").slice(0, 80) : ""; var msg = "This feature requires Wicked Premium.";
+        for (var k in PF) { if (ctx.indexOf(k) !== -1) { msg = PF[k]; break; } }
+        el.textContent = msg; el.style.color = "rgba(216,180,254,.8)";
+      }
+    });
+  });
+  po.observe(document.getElementById("root") || document.body, { childList: true, subtree: true });
+  /* ---- 9. SIDEBAR LABELS ---- */
+  setInterval(function() {
+    document.querySelectorAll(".nav-btn").forEach(function(btn) {
+      if (btn.dataset.wpL) return; btn.dataset.wpL = "1";
+      var title = btn.title || btn.getAttribute("aria-label") || ""; if (!title) return;
+      btn.setAttribute("aria-label", title);
+      var span = document.createElement("span"); span.className = "wp-nav-label"; span.textContent = title;
+      span.style.cssText = "position:absolute;left:100%;top:50%;transform:translateY(-50%);white-space:nowrap;background:rgba(18,16,31,.95);color:#f4f2ff;padding:5px 12px;border-radius:8px;font-size:12px;pointer-events:none;opacity:0;transition:opacity .15s;z-index:999";
+      btn.style.position = "relative"; btn.appendChild(span);
+      btn.addEventListener("mouseenter", function() { span.style.opacity = "1"; });
+      btn.addEventListener("mouseleave", function() { span.style.opacity = "0"; });
+    });
+  }, 2000);
+  /* ---- 10. LYRICS POLISH ---- */
+  setInterval(function() {
+    document.querySelectorAll(".lyric-line").forEach(function(l) { l.style.fontSize = "18px"; l.style.lineHeight = "2.2"; });
+    var ly = document.querySelector(".lyrics, [class*=\"lyrics\"]"); if (ly) { ly.style.maxHeight = "calc(100vh - 180px)"; ly.style.overflowY = "auto"; }
+  }, 1500);
+  /* ---- 11. REDUCE GLOW ---- */
+  setInterval(function() {
+    var bg = document.querySelector(".bg-art"); if (bg && !bg.dataset.wpG) { bg.dataset.wpG = "1"; bg.style.filter = "blur(80px) saturate(1.3) brightness(0.4)"; bg.style.opacity = "0.35"; }
+    document.querySelectorAll(".blob").forEach(function(b) { if (!b.dataset.wpG) { b.dataset.wpG = "1"; b.style.opacity = "0.15"; } });
+  }, 3000);
+  /* ---- 12. GIFT PANEL ---- */
+  function giftModal() {
+    var old = document.getElementById("wp-gift-panel"); if (old) { old.remove(); return; }
+    var box = document.createElement("div"); box.id = "wp-gift-panel";
+    box.style.cssText = "position:fixed;bottom:130px;right:12px;z-index:10001;background:rgba(18,16,31,.97);border:1px solid rgba(168,85,247,.4);border-radius:14px;padding:16px;width:290px;font-family:inherit;box-shadow:0 14px 40px rgba(0,0,0,.5)";
+    box.innerHTML = '<div style="font-weight:800;font-size:13px;margin-bottom:10px;color:#d8b4fe">&#127873; Redeem a gift code</div><input id="wpGiftCode" placeholder="WK-XXXXXX" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:8px;font-size:13px;text-transform:uppercase"><button id="wpGiftGo" style="width:100%;background:linear-gradient(135deg,#a855f7,#ec4899);border:none;color:#fff;border-radius:9px;padding:9px;font-weight:700;cursor:pointer;font-size:12px;margin-bottom:10px;color:#fff">Redeem</button><div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px"><div style="font-weight:700;font-size:12px;margin-bottom:6px">No code? Request premium</div><input id="wpGiftMsg" placeholder="tell the admin why" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:8px;font-size:13px"><button id="wpGiftReq" style="width:100%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px;font-weight:600;cursor:pointer;font-size:12px">Send request</button></div><div id="wpGiftOut" style="font-size:11px;margin-top:8px;min-height:16px"></div><button id="wpGiftX" style="position:absolute;top:8px;right:10px;background:none;border:none;color:rgba(244,242,255,.5);cursor:pointer;font-size:14px">&#10005;</button>';
+    document.body.appendChild(box);
+    box.querySelector("#wpGiftX").onclick = function() { box.remove(); };
+    box.querySelector("#wpGiftGo").onclick = function() { var out = box.querySelector("#wpGiftOut"); out.style.color = "#fda4af"; fetch("/api/reward/redeem", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: box.querySelector("#wpGiftCode").value }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { out.style.color = "#34d399"; out.textContent = "Premium active for " + d.days + " days!"; } else out.textContent = d.error; }).catch(function() { out.textContent = "Network error"; }); };
+    box.querySelector("#wpGiftReq").onclick = function() { var out = box.querySelector("#wpGiftOut"); out.style.color = "#fda4af"; fetch("/api/premium/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: (window.__WP_USER || {}).username, message: box.querySelector("#wpGiftMsg").value }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { out.style.color = "#34d399"; out.textContent = "Request sent!"; } else out.textContent = d.error; }).catch(function() { out.textContent = "Network error"; }); };
+  }
+  var chip = document.getElementById("wp-chip");
+  if (chip && !chip.querySelector("#wp-gift")) { var gb = document.createElement("button"); gb.id = "wp-gift"; gb.title = "Gifts"; gb.innerHTML = "\u{1F381}"; gb.onclick = function() { giftModal(); }; chip.insertBefore(gb, chip.querySelector("button")); }
+  var bgBtn = document.createElement("button"); bgBtn.id = "wp-bg-btn"; bgBtn.title = "Background"; bgBtn.innerHTML = "\u{1F3A8}"; bgBtn.onclick = function() { bgPanel(); }; if (chip) chip.insertBefore(bgBtn, chip.querySelector("button"));
   /* ============ PERF: preconnects ============ */
   for (const href of ['https://itunes.apple.com', 'https://api.deezer.com', 'https://i.scdn.co']) {
     if (!document.querySelector(`link[rel="preconnect"][href="${href}"]`)) {
