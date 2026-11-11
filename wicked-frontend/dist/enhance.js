@@ -527,7 +527,26 @@
     ".skin-alien #ovTitle{color:#39ff14;text-shadow:0 0 10px rgba(57,255,20,.9)}",
     ".skin-alien #ovArtist{color:#22c006}",
     ".skin-alien #ovSeekFill{background:#39ff14;box-shadow:0 0 10px rgba(57,255,20,.9)}",
-    ".skin-alien #ovBtns .play{background:#39ff14;color:#01130a;border-color:#39ff14}"
+    ".skin-alien #ovBtns .play{background:#39ff14;color:#01130a;border-color:#39ff14}",
+    '/* small (original) skin - compact one-liner like the first version */',
+    '.skin-small #ovRoot{background:rgba(14,10,26,.95);border:1px solid rgba(168,85,247,.4);border-radius:12px;min-height:60px !important;box-shadow:0 6px 24px rgba(0,0,0,.6)}',
+    '.skin-small #ovBody{padding:4px 10px;gap:8px;min-height:50px}',
+    '.skin-small #ovArt{width:36px;height:36px}',
+    '.skin-small #ovTitle{font-size:11px}',
+    '.skin-small #ovArtist{font-size:10px;margin-top:0}',
+    '.skin-small #ovTimes{display:none}',
+    '.skin-small #ovSeek{height:3px;margin-top:2px}',
+    '.skin-small #ovBtns button{width:26px;height:26px;font-size:11px;border-radius:7px}',
+    '.skin-small #ovBtns .play{width:30px;height:30px;font-size:13px}',
+    '.skin-small #ovBtns #ovLike{display:none}',
+    '.skin-small #ovVol{display:none}',
+    '.skin-small #ovFoot{display:none}',
+    '/* settings panel */',
+    '#ovSettingsPanel{position:absolute;inset:0;background:rgba(10,8,20,.97);z-index:10;display:flex;flex-direction:column;padding:14px;border-radius:16px;overflow-y:auto}',
+    '#ovSettingsPanel h3{color:#f4f2ff;font-size:14px;margin-bottom:12px;font-family:inherit}',
+    '#ovSettingsPanel label{color:rgba(244,242,255,.6);font-size:11px;display:block;margin:10px 0 4px}',
+    '#ovSettingsPanel select,#ovSettingsPanel input[type=range]{width:100%;background:rgba(255,255,255,.08);color:#f4f2ff;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px;font-family:inherit;font-size:12px}',
+    '#ovSettingsPanel button{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:8px;padding:8px 14px;cursor:pointer;font-family:inherit;font-size:12px;margin-top:10px}'
   ].join("\n");
   document.head.appendChild(css);
 
@@ -562,8 +581,10 @@
     '    <option value="ipod">iPod</option>',
     '    <option value="alien">Alien</option>',
     '    <option value="minimal">Minimal</option>',
+    '    <option value="small">Small (original)</option>',
     '  </select>',
     '  <input id="ovVol" type="range" min="0" max="100" value="80" aria-label="Volume" title="Volume">',
+    '  <button id="ovSettings" aria-label="Overlay settings" title="Settings">&#9881;</button>',
     '  <div class="sp"></div>',
     '  <div class="hint">drag top bar &middot; Space play &middot; &larr;&rarr; seek &middot; L like</div>',
     '</div>',
@@ -667,6 +688,43 @@
   };
   $("ovHide").onclick = function () { wu.winctl("overlay"); };
   $("ovClose").onclick = function () { wu.winctl("overlay"); };
+  $("ovSettings").onclick = function () {
+    const panel = document.getElementById("ovSettingsPanel");
+    if (panel) { panel.remove(); return; }
+    const p = document.createElement("div");
+    p.id = "ovSettingsPanel";
+    p.innerHTML = [
+      '<h3>Overlay Settings</h3>',
+      '<label>Skin</label>',
+      '<select id="setSkin"><option value="winamp">Winamp</option><option value="xbox">Xbox 360</option><option value="wmp">WMP 10</option><option value="ipod">iPod</option><option value="alien">Alien</option><option value="minimal">Minimal</option><option value="small">Small (original)</option></select>',
+      '<label>Compact mode</label>',
+      '<select id="setCompact"><option value="false">Full mini-player</option><option value="true">Compact pill</option></select>',
+      '<label>Volume</label>',
+      '<input type="range" id="setVol" min="0" max="100" value="' + Math.round(S.settings.volume * 100) + '">',
+      '<button id="setClose">Done</button>'
+    ].join("");
+    root.appendChild(p);
+    p.querySelector("#setSkin").value = S.settings.skin;
+    p.querySelector("#setSkin").onchange = function () {
+      S.settings.skin = this.value;
+      applySkin(this.value);
+      E.skin.value = this.value;
+      wu.overlayCmd({ type: "ui", skin: this.value });
+    };
+    p.querySelector("#setCompact").value = String(S.settings.compact);
+    p.querySelector("#setCompact").onchange = function () {
+      S.settings.compact = this.value === "true";
+      applyCompact(S.settings.compact);
+      wu.overlayCmd({ type: "ui", compact: S.settings.compact });
+    };
+    p.querySelector("#setVol").value = String(Math.round(S.settings.volume * 100));
+    p.querySelector("#setVol").oninput = function () {
+      S.settings.volume = parseInt(this.value, 10) / 100;
+      E.vol.value = this.value;
+      wu.overlayCmd({ type: "volume", value: S.settings.volume });
+    };
+    p.querySelector("#setClose").onclick = function () { p.remove(); };
+  };
 
   E.seek.addEventListener("keydown", function (e) {
     if (E.seek.disabled) return;

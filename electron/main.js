@@ -1,4 +1,4 @@
-﻿const { app, BrowserWindow, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -181,10 +181,10 @@ function createOverlay() {
   overlay = new BrowserWindow({
     width: 440,
     height: 190,
-    minWidth: 300,
-    minHeight: 140,
-    maxWidth: 900,
-    maxHeight: 500,
+    minWidth: 240,
+    minHeight: 60,
+    maxWidth: 1400,
+    maxHeight: 800,
     alwaysOnTop: true,
     frame: false,
     transparent: true,
