@@ -40,7 +40,9 @@
     }
     const adminLink = user.role === 'admin' ? ' <a class="wp-admin-link" href="/admin">ADMIN</a>' : '';
     const av = user.discord && user.discord.avatar ? `<img src="${user.discord.avatar}" />` : '';
-    chip.innerHTML = `${av}<span><b>${user.username}</b> <span class="role">${user.role.toUpperCase()}</span>${adminLink}</span><button id="wp-key" title="Change password">🔑</button><button id="wp-logout">Log out</button>`;
+    chip.innerHTML = `${av}<span><b>${user.username}</b> <span class="role">${user.role.toUpperCase()}</span>${adminLink}</span><button id="wp-gift" title="Gifts & premium">&#127873;</button><button id="wp-key" title="Change password">🔑</button><button id="wp-logout">Log out</button>`;
+    const giftBtn = document.getElementById('wp-gift');
+    if (giftBtn) giftBtn.onclick = function () { if (window.__wpGiftModal) window.__wpGiftModal(); };
     const keyBtn = document.getElementById('wp-key');
     if (keyBtn) keyBtn.onclick = () => pwModal();
     document.getElementById('wp-logout').onclick = async () => {

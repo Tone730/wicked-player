@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Wicked Player — Admin</title>
+<title>Wicked Player â€” Admin</title>
 <link rel="icon" type="image/svg+xml" href="/wicked-icon.svg" />
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
 <style>
@@ -57,27 +57,28 @@
 </head>
 <body>
   <div class="head">
-    <h1><img src="/wicked-icon.svg" /> Wicked Player — Admin Console</h1>
+    <h1><img src="/wicked-icon.svg" /> Wicked Player â€” Admin Console</h1>
     <div class="tabs">
       <div class="tab on" data-p="users">Users</div>
       <div class="tab" data-p="online">Live</div>
       <div class="tab" data-p="logins">Logins</div>
-      <div class="tab" onclick="location.href='/'">← Back to app</div>
+      <div class="tab" data-p="premium">Premium</div>
+      <div class="tab" onclick="location.href='/'">â† Back to app</div>
     </div>
   </div>
 
   <div class="stats">
-    <div class="stat"><b id="stTotal">–</b><span>accounts</span></div>
-    <div class="stat"><b id="stOnline">–</b><span>online now</span></div>
-    <div class="stat"><b id="stBanned">–</b><span>banned</span></div>
-    <div class="stat"><b id="stDiscord">–</b><span>discord linked</span></div>
+    <div class="stat"><b id="stTotal">â€“</b><span>accounts</span></div>
+    <div class="stat"><b id="stOnline">â€“</b><span>online now</span></div>
+    <div class="stat"><b id="stBanned">â€“</b><span>banned</span></div>
+    <div class="stat"><b id="stDiscord">â€“</b><span>discord linked</span></div>
   </div>
 
   <!-- DISCORD RPC CONFIG -->
   <div class="panel on" style="margin-bottom:22px;">
     <div class="toolbar" style="align-items:flex-end;">
       <div style="flex:1;min-width:260px;">
-        <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:1px;">DISCORD APPLICATION ID — enables "Listening to" Rich Presence for everyone</label>
+        <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:1px;">DISCORD APPLICATION ID â€” enables "Listening to" Rich Presence for everyone</label>
         <input class="searchbox" id="rpcId" placeholder="paste your Discord application ID (15-25 digits)" />
       </div>
       <button class="abtn" onclick="saveRpc()">Save & activate</button>
@@ -89,15 +90,15 @@
       </div>
       <button class="abtn" onclick="saveRpc()">Save</button>
     </div>
-    <div style="font-size:12px;color:var(--muted);">Create a free app at <a href="https://discord.com/developers/applications" target="_blank" style="color:#d8b4fe;">discord.com/developers/applications</a> → copy the Application ID → paste here. In the app's settings enable "Art Assets" so album art shows in Discord. Restart the player after saving.</div>
+    <div style="font-size:12px;color:var(--muted);">Create a free app at <a href="https://discord.com/developers/applications" target="_blank" style="color:#d8b4fe;">discord.com/developers/applications</a> â†’ copy the Application ID â†’ paste here. In the app's settings enable "Art Assets" so album art shows in Discord. Restart the player after saving.</div>
   </div>
 
   <!-- USERS -->
   <div class="panel on" id="p-users">
     <div class="toolbar">
-      <input class="searchbox" id="filter" placeholder="Filter users…" />
-      <button class="abtn" onclick="openCreate()">＋ Create account</button>
-      <button class="abtn" onclick="loadUsers()">⟳ Refresh</button>
+      <input class="searchbox" id="filter" placeholder="Filter usersâ€¦" />
+      <button class="abtn" onclick="openCreate()">ï¼‹ Create account</button>
+      <button class="abtn" onclick="loadUsers()">âŸ³ Refresh</button>
     </div>
     <table>
       <thead><tr>
@@ -119,14 +120,31 @@
     <tbody id="loginRows"></tbody></table>
   </div>
 
-  <!-- modals -->
+  
+  <!-- PREMIUM -->
+  <div class="panel" id="p-premium">
+    <div class="toolbar">
+      <button class="abtn" onclick="loadPremium()">⟳ Refresh</button>
+      <span style="color:var(--muted);font-size:12px;">Approve premium requests, review redemptions, revoke access.</span>
+    </div>
+    <h3 style="margin:10px 0 8px;font-size:14px;">Pending requests</h3>
+    <table><thead><tr><th>USER</th><th>MESSAGE</th><th>REQUESTED</th><th>ACTIONS</th></tr></thead>
+    <tbody id="premReqRows"></tbody></table>
+    <h3 style="margin:18px 0 8px;font-size:14px;">Active premium</h3>
+    <table><thead><tr><th>USER</th><th>UNTIL</th><th>SOURCE</th><th>ACTIONS</th></tr></thead>
+    <tbody id="premActiveRows"></tbody></table>
+    <h3 style="margin:18px 0 8px;font-size:14px;">Redemption log</h3>
+    <table><thead><tr><th>USER</th><th>CODE</th><th>DAYS</th><th>STATUS</th><th>DATE</th></tr></thead>
+    <tbody id="premLogRows"></tbody></table>
+  </div>
+<!-- modals -->
   <div class="modal-bg" id="modalBg">
     <div class="modal" id="modalBody"></div>
   </div>
 
 <script>
   const $ = (s) => document.querySelector(s);
-  const fmt = (ts) => ts ? new Date(ts).toLocaleString() : '—';
+  const fmt = (ts) => ts ? new Date(ts).toLocaleString() : 'â€”';
   const ago = (ts) => { if (!ts) return 'never';
     const s = Math.floor((Date.now() - ts) / 1000);
     if (s < 60) return s + 's ago'; if (s < 3600) return Math.floor(s/60) + 'm ago';
@@ -156,15 +174,15 @@
     const rows = USERS.filter(u => u.username.toLowerCase().includes(q));
     $('#userRows').innerHTML = rows.map(u => {
       const online = u.lastSeen && (Date.now() - u.lastSeen < 5 * 60 * 1000);
-      let status = `<span class="pill ${online ? 'online' : 'off'}">${online ? '● online' : 'offline'}</span>`;
+      let status = `<span class="pill ${online ? 'online' : 'off'}">${online ? 'â— online' : 'offline'}</span>`;
       if (u.banned) {
         status = u.bannedUntil
-          ? `<span class="pill banned">⏱ until ${fmt(u.bannedUntil)}</span>`
-          : `<span class="pill banned">⛔ permanent</span>`;
+          ? `<span class="pill banned">â± until ${fmt(u.bannedUntil)}</span>`
+          : `<span class="pill banned">â›” permanent</span>`;
       }
       const discord = u.discord
         ? `<img class="avatar" src="${esc(u.discord.avatar)}" onerror="this.style.visibility='hidden'" />${esc(u.discord.username)}`
-        : '<span style="color:var(--muted)">—</span>';
+        : '<span style="color:var(--muted)">â€”</span>';
       const actions = [];
       if (!u.banned) actions.push(`<button class="abtn danger" onclick="banModal('${esc(u.username)}')">Ban</button>`);
       else actions.push(`<button class="abtn" onclick="unban('${esc(u.username)}')">Unban</button>`);
@@ -219,7 +237,7 @@
     try { await api('/admin/api/role', { username, role: role === 'admin' ? 'user' : 'admin' }); loadUsers(); } catch (e) { alert(e.message); }
   }
   function resetPass(username) {
-    modal(`<h3>Reset password — ${esc(username)}</h3>
+    modal(`<h3>Reset password â€” ${esc(username)}</h3>
       <input id="np" type="text" placeholder="new password (4+ chars)" />
       <div class="mrow">
         <button class="abtn" onclick="closeModal()">Cancel</button>
@@ -251,7 +269,7 @@
       const rows = await api('/admin/api/online');
       $('#stOnline').textContent = rows.length;
       $('#onlineRows').innerHTML = rows.length ? rows.map(r =>
-        `<tr><td><b>${esc(r.username)}</b></td><td style="color:var(--muted)">${esc(r.ip || '—')}</td>
+        `<tr><td><b>${esc(r.username)}</b></td><td style="color:var(--muted)">${esc(r.ip || 'â€”')}</td>
          <td style="color:var(--muted);font-size:12px">${esc((r.ua || '').slice(0, 60))}</td>
          <td style="color:var(--muted)">${ago(r.lastSeen)}</td></tr>`).join('')
         : '<tr><td colspan="4" style="color:var(--muted)">Nobody online right now</td></tr>';
@@ -262,7 +280,7 @@
       const rows = await api('/admin/api/logins');
       $('#loginRows').innerHTML = rows.length ? rows.map(r =>
         `<tr><td><b>${esc(r.user)}</b></td><td style="color:var(--muted)">${fmt(r.created)}</td>
-         <td style="color:var(--muted)">${esc(r.ip || '—')}</td>
+         <td style="color:var(--muted)">${esc(r.ip || 'â€”')}</td>
          <td style="color:var(--muted);font-size:12px">${esc((r.ua || '').slice(0, 60))}</td></tr>`).join('')
         : '<tr><td colspan="4" style="color:var(--muted)">No logins recorded yet</td></tr>';
     } catch (e) {}
@@ -279,6 +297,39 @@
   });
   $('#filter').oninput = renderUsers;
 
+  document.querySelectorAll('.tab[data-p="premium"]').forEach(function (t) {
+    t.addEventListener('click', function () { loadPremium(); });
+  });
+  async function loadPremium() {
+    try {
+      var reqs = await api('/admin/api/premium-requests');
+      var active = await api('/admin/api/premium-active');
+      var log = [];
+      try { log = await api('/admin/api/redemptions'); } catch (e) {}
+      document.getElementById('premReqRows').innerHTML = reqs.filter(function (r) { return r.status === 'pending'; }).map(function (r) {
+        return '<tr><td><b>' + esc(r.user) + '</b></td><td>' + esc(r.message || '') + '</td><td style="color:var(--muted)">' + ago(r.at) + '</td>' +
+          '<td><div class="actions"><button class="abtn" onclick="decide(\'' + esc(r.user) + '\',\'approve\',30)">Approve 30d</button>' +
+          '<button class="abtn" onclick="decide(\'' + esc(r.user) + '\',\'approve\',7)">7d</button>' +
+          '<button class="abtn danger" onclick="decide(\'' + esc(r.user) + '\',\'deny\')">Deny</button></div></td></tr>';
+      }).join('') || '<tr><td colspan="4" style="color:var(--muted)">No pending requests</td></tr>';
+      document.getElementById('premActiveRows').innerHTML = active.map(function (a) {
+        return '<tr><td><b>' + esc(a.user) + '</b></td><td>' + (a.permanent ? 'permanent' : new Date(a.until).toLocaleDateString()) + '</td>' +
+          '<td style="color:var(--muted);font-size:12px">' + esc(a.source || '') + '</td>' +
+          '<td><button class="abtn danger" onclick="revoke(\'' + esc(a.user) + '\')">Revoke</button></td></tr>';
+      }).join('') || '<tr><td colspan="4" style="color:var(--muted)">Nobody has active premium</td></tr>';
+      document.getElementById('premLogRows').innerHTML = log.map(function (r) {
+        return '<tr><td>' + esc(r.user) + '</td><td>' + esc(r.code) + '</td><td>' + r.days + 'd</td><td>' + esc(r.status) + '</td><td style="color:var(--muted)">' + ago(r.at) + '</td></tr>';
+      }).join('') || '<tr><td colspan="5" style="color:var(--muted)">No redemptions yet</td></tr>';
+    } catch (e) { alert('Failed: ' + e.message); }
+  }
+  async function decide(user, decision, days) {
+    try { await api('/admin/api/premium-request/decide', { user: user, decision: decision, days: days }); loadPremium(); }
+    catch (e) { alert(e.message); }
+  }
+  async function revoke(user) {
+    try { await api('/admin/api/premium-revoke', { user: user }); loadPremium(); }
+    catch (e) { alert(e.message); }
+  }
   /* init + auto refresh */
   loadUsers(); loadOnline(); loadLogins();
   setInterval(() => { loadOnline(); }, 15000);

@@ -331,6 +331,116 @@ router.get('/api/online-users', (_req, res) => {
 });
 
 /* discord app config (admin) — used by the desktop app for Rich Presence */
+/* ---------- premium redemption system ----------
+   Codes (WK-XXXXXX / premium codes) live in ../data/codes.json via server.js.
+   A user submits a code -> it activates time-limited premium on their
+   community profile and logs a redemption the admin can review/revoke. */
+const COMM_FILE = path.join(DATA_DIR, "community.json");
+const CODES_FILE = path.join(DATA_DIR, "codes.json");
+
+function readJsonSafe(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+}
+function premiumActive(p) {
+  if (!p) return false;
+  if (p.premiumUntil) return Date.now() < p.premiumUntil;
+  return !!p.premium;
+}
+
+router.post("/api/reward/redeem", (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: "Login required", auth: true });
+  const code = String(req.body.code || "").toUpperCase().trim();
+  if (!code) return res.status(400).json({ error: "Enter your code" });
+
+  const codes = readJsonSafe(CODES_FILE, {});
+  const entry = codes[code];
+  if (!entry) return res.status(404).json({ error: "Unknown code. Check for typos." });
+  if (entry.used) return res.status(409).json({ error: "That code was already used" });
+
+  const days = entry.days || (entry.type === "jackpot" ? 7 : 30);
+  const until = Date.now() + days * 86400000;
+
+  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  comm.profiles = comm.profiles || {};
+  const prof = comm.profiles[u.username] || {};
+  const prevUntil = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : 0;
+  prof.premium = true;
+  prof.premiumUntil = Math.max(prevUntil, until);
+  prof.premiumSource = "code:" + code;
+  comm.profiles[u.username] = prof;
+  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+
+  codes[code] = { used: true, usedBy: u.username, usedAt: Date.now(), days };
+  fs.writeFileSync(CODES_FILE, JSON.stringify(codes, null, 2));
+
+  const log = readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []);
+  log.unshift({ user: u.username, code: code, days: days, at: Date.now(), status: "active", until: prof.premiumUntil });
+  fs.writeFileSync(path.join(DATA_DIR, "redemptions.json"), JSON.stringify(log.slice(0, 200), null, 2));
+
+  res.json({ ok: true, days: days, until: prof.premiumUntil });
+});
+
+/* premium request: users without a code can ask the admin */
+router.post("/api/premium/request", (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: "Login required", auth: true });
+  const msg = String(req.body.message || "").slice(0, 200);
+  const reqs = readJsonSafe(path.join(DATA_DIR, "premium-requests.json"), []);
+  if (reqs.find(function (r) { return r.user === u.username && r.status === "pending"; })) {
+    return res.status(409).json({ error: "You already have a pending request" });
+  }
+  reqs.unshift({ user: u.username, message: msg, at: Date.now(), status: "pending" });
+  fs.writeFileSync(path.join(DATA_DIR, "premium-requests.json"), JSON.stringify(reqs.slice(0, 100), null, 2));
+  res.json({ ok: true });
+});
+
+router.get("/admin/api/premium-requests", requireAdmin, function (_req, res) {
+  res.json(readJsonSafe(path.join(DATA_DIR, "premium-requests.json"), []));
+});
+router.post("/admin/api/premium-request/decide", requireAdmin, function (req, res) {
+  const user = String(req.body.user || "");
+  const decision = req.body.decision === "approve" ? "approved" : "denied";
+  const reqs = readJsonSafe(path.join(DATA_DIR, "premium-requests.json"), []);
+  const entry = reqs.find(function (r) { return r.user === user && r.status === "pending"; });
+  if (!entry) return res.status(404).json({ error: "No pending request for that user" });
+  entry.status = decision;
+  entry.decidedAt = Date.now();
+  fs.writeFileSync(path.join(DATA_DIR, "premium-requests.json"), JSON.stringify(reqs, null, 2));
+  if (decision === "approved") {
+    const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+    comm.profiles = comm.profiles || {};
+    const prof = comm.profiles[user] || {};
+    const d = Number(req.body.days) || 30;
+    const prevUntil = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : Date.now();
+    prof.premium = true;
+    prof.premiumUntil = prevUntil + d * 86400000;
+    prof.premiumSource = "admin-approved";
+    comm.profiles[user] = prof;
+    fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  }
+  res.json({ ok: true, decision: decision });
+});
+
+router.get("/admin/api/premium-active", requireAdmin, function (_req, res) {
+  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  const out = [];
+  for (const name in (comm.profiles || {})) {
+    const p = comm.profiles[name];
+    if (premiumActive(p)) {
+      out.push({ user: name, until: p.premiumUntil || null, permanent: !p.premiumUntil, source: p.premiumSource || null });
+    }
+  }
+  res.json(out);
+});
+router.post("/admin/api/premium-revoke", requireAdmin, function (req, res) {
+  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  const prof = (comm.profiles || {})[String(req.body.user || "")];
+  if (!prof) return res.status(404).json({ error: "No such profile" });
+  prof.premium = false; prof.premiumUntil = null; prof.premiumSource = null;
+  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  res.json({ ok: true });
+});
 const DISCORD_APP_FILE = path.join(DATA_DIR, 'discord-app.json');
 router.get('/admin/api/discord-app', requireAdmin, (_req, res) => {
   let clientId = process.env.DISCORD_CLIENT_ID || null;

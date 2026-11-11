@@ -288,6 +288,56 @@
   }
   setInterval(fixProfileModal, 2000);
 
+  /* ---- gift / premium code redemption panel ---- */
+  function giftModal() {
+    const old = document.getElementById('wp-gift-panel');
+    if (old) { old.remove(); return; }
+    const box = document.createElement('div');
+    box.id = 'wp-gift-panel';
+    box.style.cssText = 'position:fixed;bottom:130px;right:12px;z-index:10001;background:rgba(18,16,31,.97);border:1px solid rgba(168,85,247,.4);border-radius:14px;padding:16px;width:290px;font-family:inherit;box-shadow:0 14px 40px rgba(0,0,0,.5);';
+    box.innerHTML = [
+      '<div style="font-weight:800;font-size:13px;margin-bottom:10px;color:#d8b4fe;">\u{1F381} Redeem a gift code</div>',
+      '<input id="wpGiftCode" placeholder="WK-XXXXXX or premium code" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:8px;font-size:13px;text-transform:uppercase;">',
+      '<button id="wpGiftGo" style="width:100%;background:linear-gradient(135deg,#a855f7,#ec4899);border:none;color:#fff;border-radius:9px;padding:9px;font-weight:700;cursor:pointer;font-family:inherit;font-size:12px;margin-bottom:10px;">Redeem</button>',
+      '<div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px;margin-bottom:8px;">',
+      '  <div style="font-weight:700;font-size:12px;margin-bottom:6px;">No code? Request premium</div>',
+      '  <input id="wpGiftMsg" placeholder="tell the admin why (optional)" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:8px;font-size:13px;">',
+      '  <button id="wpGiftReq" style="width:100%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px;font-weight:600;cursor:pointer;font-family:inherit;font-size:12px;">Send request to admin</button>',
+      '</div>',
+      '<div id="wpGiftMsgOut" style="font-size:11px;margin-top:8px;min-height:16px;"></div>',
+      '<button id="wpGiftX" style="position:absolute;top:8px;right:10px;background:none;border:none;color:rgba(244,242,255,.5);cursor:pointer;font-size:14px;">\u2715</button>'
+    ].join('');
+    document.body.appendChild(box);
+    box.querySelector('#wpGiftX').onclick = function () { box.remove(); };
+    box.querySelector('#wpGiftGo').onclick = async function () {
+      const out = box.querySelector('#wpGiftMsgOut');
+      out.style.color = '#fda4af';
+      try {
+        const r = await fetch('/api/reward/redeem', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: box.querySelector('#wpGiftCode').value }),
+        });
+        const d = await r.json();
+        if (r.ok) { out.style.color = '#34d399'; out.textContent = '\u{1F389} Premium active for ' + d.days + ' days!'; }
+        else out.textContent = d.error || 'Failed';
+      } catch { out.textContent = 'Network error'; }
+    };
+    box.querySelector('#wpGiftReq').onclick = async function () {
+      const out = box.querySelector('#wpGiftMsgOut');
+      out.style.color = '#fda4af';
+      try {
+        const r = await fetch('/api/premium/request', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: (window.__WP_USER || {}).username, message: box.querySelector('#wpGiftMsg').value }),
+        });
+        const d = await r.json();
+        if (r.ok) { out.style.color = '#34d399'; out.textContent = 'Request sent - the admin will review it.'; }
+        else out.textContent = d.error || 'Failed';
+      } catch { out.textContent = 'Network error'; }
+    };
+  }
+  window.__wpGiftModal = giftModal;
+
   /* ============ PERF: preconnects ============ */
   for (const href of ['https://itunes.apple.com', 'https://api.deezer.com', 'https://i.scdn.co']) {
     if (!document.querySelector(`link[rel="preconnect"][href="${href}"]`)) {
