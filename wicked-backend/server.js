@@ -431,14 +431,22 @@ async function readRewards() {
   try { return JSON.parse(await fs.promises.readFile(rewardsFile, 'utf8')); } catch { return { issued: [] }; }
 }
 async function writeRewards(d) { await fs.promises.writeFile(rewardsFile, JSON.stringify(d, null, 2)); }
-const REWARD_TYPES = [
-  { type: 'badge',    label: 'Loyalty badge - show it off on your profile', weight: 30 },
-  { type: 'bonus',    label: 'Bonus soundboard pack (this week only)',      weight: 24 },
-  { type: 'shoutout', label: 'Discord shoutout from the host',              weight: 20 },
-  { type: 'skip',     label: '3 unlimited-skip boosters',                   weight: 14 },
-  { type: 'premium',  label: 'FREE Premium code - redeem in Settings',      weight: 8  },
-  { type: 'jackpot',  label: 'JACKPOT - 7-day Premium code',                weight: 4  },
-];
+  const REWARD_TYPES = [
+    { type: 'badge',     label: 'Loyalty badge - show it off on your profile',      weight: 18 },
+    { type: 'bonus',     label: 'Bonus soundboard pack (this week only)',           weight: 14 },
+    { type: 'shoutout',  label: 'Discord shoutout from the host',                    weight: 10 },
+    { type: 'skip',      label: '5 unlimited-skip boosters',                        weight: 12 },
+    { type: 'premium',   label: 'FREE Premium code - redeem in Settings',           weight: 8  },
+    { type: 'jackpot',   label: 'JACKPOT - 7-day Premium code',                     weight: 3  },
+    { type: 'skip10',    label: '10 unlimited-skip boosters',                       weight: 8  },
+    { type: 'avatar',    label: 'Animated avatar frame - 30 days',                  weight: 6  },
+    { type: 'eqboost',   label: 'Bonus EQ preset: Bass Cannon (30 days)',           weight: 6  },
+    { type: 'theme',     label: 'Custom theme unlock - 30 days',                    weight: 5  },
+    { type: 'playlist',  label: 'Extra playlist slot +10 tracks',                   weight: 7  },
+    { type: 'doublexp',  label: 'Double listening XP - 1 hour',                     weight: 5  },
+    { type: 'mystery',   label: '??? Mystery box - could be anything',              weight: 4  },
+    { type: 'mega',      label: 'MEGA DROP - 30-day Premium + badge + 20 skips',    weight: 2  },
+  ];
 function rollReward() {
   const total = REWARD_TYPES.reduce((s, r) => s + r.weight, 0);
   let n = Math.random() * total;
@@ -485,6 +493,31 @@ app.get('/api/config/discord-invite', (_req, res) => {
     if (cfg.invite) invite = cfg.invite;
   } catch {}
   res.json({ invite });
+});
+
+app.post('/library/playlists/add-track', (req, res) => {
+  const { name, track } = req.body;
+  if (!name || !track || !track.id) return res.status(400).json({ error: 'Missing playlist name or track' });
+  let list = [];
+  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
+  const pl = list.find(function (p) { return p.name === name; });
+  if (!pl) return res.status(404).json({ error: 'Playlist not found' });
+  pl.tracks = pl.tracks || [];
+  if (pl.tracks.find(function (t) { return t.id === track.id; })) return res.json({ ok: true, added: false, reason: 'already in playlist' });
+  pl.tracks.push({ id: track.id, name: track.name, artist: track.artist, album: track.album, art: track.art, duration_ms: track.duration_ms || 0, stream_url: track.stream_url, addedAt: Date.now() });
+  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
+  res.json({ ok: true, added: true, playlist: name, trackCount: pl.tracks.length });
+});
+
+app.post('/library/playlists/remove-track', (req, res) => {
+  const { name, trackId } = req.body;
+  let list = [];
+  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
+  const pl = list.find(function (p) { return p.name === name; });
+  if (!pl) return res.status(404).json({ error: 'Playlist not found' });
+  pl.tracks = (pl.tracks || []).filter(function (t) { return t.id !== trackId; });
+  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
+  res.json({ ok: true, trackCount: pl.tracks.length });
 });
 
 app.get('/api/rewards', async (req, res) => {

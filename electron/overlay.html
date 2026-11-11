@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
+html,body{background:transparent;overflow:hidden;height:100%;font-family:'Outfit','Segoe UI',sans-serif}
+#root{height:100vh;display:flex;flex-direction:column;border-radius:14px;overflow:hidden;
+  background:linear-gradient(160deg,rgba(18,16,31,.97),rgba(10,8,20,.98));
+  border:1px solid rgba(168,85,247,.4);box-shadow:0 10px 40px rgba(0,0,0,.6)}
+#drag{height:22px;flex:0 0 auto;display:flex;align-items:center;padding:0 10px;
+  -webkit-app-region:drag;background:rgba(255,255,255,.04)}
+#drag .ttl{flex:1;font-size:8px;letter-spacing:2px;font-weight:800;color:rgba(244,242,255,.4)}
+#drag button{-webkit-app-region:no-drag;background:none;border:none;color:rgba(244,242,255,.45);
+  cursor:pointer;font-size:11px;padding:1px 4px;border-radius:4px}
+#drag button:hover{color:#fff;background:rgba(255,255,255,.1)}
+#body{flex:1;display:flex;align-items:center;gap:10px;padding:6px 12px;min-height:0}
+#art{width:52px;height:52px;border-radius:8px;flex:0 0 auto;
+  background:rgba(255,255,255,.06) center/cover no-repeat}
+#meta{flex:1;min-width:0}
+#title{font-weight:800;font-size:13px;color:#f4f2ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#artist{font-size:11px;color:rgba(244,242,255,.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+#times{font-size:9px;color:rgba(244,242,255,.4);margin-top:4px;font-variant-numeric:tabular-nums}
+#seek{margin-top:4px;height:5px;border-radius:3px;background:rgba(255,255,255,.12);cursor:pointer;position:relative}
+#seekFill{height:100%;border-radius:3px;width:0%;background:linear-gradient(90deg,#a855f7,#ec4899)}
+#btns{display:flex;gap:5px;align-items:center;flex:0 0 auto}
+#btns button{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;
+  border-radius:9px;width:32px;height:32px;cursor:pointer;font-size:12px}
+#btns .play{width:40px;height:40px;font-size:14px;background:linear-gradient(135deg,#a855f7,#ec4899);border:none;color:#fff}
+#btns button:hover{border-color:#a855f7}
+#btns button:disabled{opacity:.3;cursor:default}
+#btns .liked{color:#ec4899;border-color:#ec4899}
+#vol{width:56px;height:20px;-webkit-appearance:none;appearance:none;background:transparent}
+#vol::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;background:#a855f7;cursor:pointer}
+#vol::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:rgba(255,255,255,.15)}
+#foot{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:3px 10px 6px}
+#foot select{background:rgba(255,255,255,.08);color:#f4f2ff;border:1px solid rgba(255,255,255,.12);
+  border-radius:6px;font-size:10px;padding:2px 4px;font-family:inherit;cursor:pointer}
+#foot .sp{flex:1}
+#foot .hint{font-size:8px;color:rgba(244,242,255,.3)}
+/* states */
+#status{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;
+  gap:6px;background:rgba(10,8,20,.95);z-index:10;border-radius:14px}
+#status .big{font-size:13px;font-weight:700;color:#f4f2ff}
+#status .small{font-size:10px;color:rgba(244,242,255,.45)}
+/* compact mode */
+#root.compact #body{padding:2px 8px;gap:6px}
+#root.compact #art{width:32px;height:32px}
+#root.compact #title{font-size:11px}
+#root.compact #artist{display:none}
+#root.compact #times{display:none}
+#root.compact #btns button{width:24px;height:24px;font-size:10px}
+#root.compact #btns .play{width:28px;height:28px}
+#root.compact #vol{display:none}
+/* skins */
+.skin-winamp #root{background:linear-gradient(180deg,#3a3d36,#141512);border:3px solid #0a0b09;border-radius:4px}
+.skin-winamp #body{background:linear-gradient(180deg,#0e1210,#050706);border:2px solid #14150f;position:relative;overflow:hidden;margin:2px 6px;border-radius:3px}
+.skin-winamp #body::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(0,0,0,.2) 0 1px,transparent 1px 3px)}
+.skin-winamp #title{color:#29e07f;font-family:Consolas,monospace;text-shadow:0 0 5px rgba(41,224,127,.6)}
+.skin-winamp #artist{color:#8fbf9f;font-family:Consolas,monospace}
+.skin-winamp #seekFill{background:#29e07f}
+.skin-winamp #btns .play{background:#29e07f;color:#000}
+.skin-xbox #root{background:linear-gradient(160deg,#eef1f4,#d5dae0);border:1px solid #9aa0ab;border-radius:20px}
+.skin-xbox #title{color:#23350a}.skin-xbox #artist{color:#5d7a33}
+.skin-xbox #seekFill{background:linear-gradient(90deg,#9bf00b,#5faa06)}
+.skin-xbox #btns .play{background:radial-gradient(circle at 35% 30%,#c5ff4d,#76c407);color:#fff;border-color:#5faa06}
+.skin-wmp #root{background:linear-gradient(180deg,#1b3a6b,#0a1830);border:2px solid #6d9bd8;border-radius:8px}
+.skin-wmp #title{color:#eaf3ff}.skin-wmp #artist{color:#9dbce6}
+.skin-wmp #seekFill{background:linear-gradient(90deg,#ff9a2e,#ffc46e)}
+.skin-wmp #btns .play{background:linear-gradient(180deg,#ffb35c,#f07f10);color:#3a1d00}
+.skin-ipod #root{background:linear-gradient(145deg,#f8f9fb,#c3c8d0);border:1px solid #9aa0ab;border-radius:24px}
+.skin-ipod #body{background:linear-gradient(180deg,#cdd3da,#b4bac2);border:2px solid #868c97;border-radius:6px}
+.skin-ipod #title{color:#16181d}.skin-ipod #artist{color:#454a53}
+.skin-ipod #seekFill{background:#16181d}
+.skin-ipod #btns button{background:linear-gradient(180deg,#eef0f3,#c9cdd4);color:#2b2e35;border-color:#868c97}
+.skin-ipod #btns .play{background:#2b2e35;color:#fff;border-color:#000}
+.skin-alien #root{background:radial-gradient(ellipse at 50% 0%,#062d12,#010d06);border:2px solid #39ff14;border-radius:50px;
+  box-shadow:0 0 20px rgba(57,255,20,.3)}
+.skin-alien #title{color:#39ff14;text-shadow:0 0 8px rgba(57,255,20,.8)}
+.skin-alien #artist{color:#22c006}
+.skin-alien #seekFill{background:#39ff14}
+.skin-alien #btns .play{background:#39ff14;color:#000;border-color:#39ff14}
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="drag">
+    <div class="ttl">WICKED PLAYER</div>
+    <button id="btnHide" aria-label="Hide overlay" title="Hide (Ctrl+Alt+O to reopen)">&#x2014;</button>
+    <button id="btnClose" aria-label="Close overlay" title="Close">&#x2715;</button>
+  </div>
+  <div id="body">
+    <div id="art" role="img" aria-label="Album art"></div>
+    <div id="meta">
+      <div id="title">Loading...</div>
+      <div id="artist">connecting to player</div>
+      <div id="times"><span id="posEl">0:00</span> / <span id="durEl">0:00</span></div>
+      <div id="seek" role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"><div id="seekFill"></div></div>
+    </div>
+    <div id="btns">
+      <button id="btnPrev" aria-label="Previous track" title="Previous">&#9198;</button>
+      <button id="btnPlay" class="play" aria-label="Play or pause" title="Play/Pause" disabled>&#9654;</button>
+      <button id="btnNext" aria-label="Next track" title="Next">&#9197;</button>
+      <button id="btnLike" aria-label="Like this track" title="Like">&#9825;</button>
+      <input id="vol" type="range" min="0" max="100" value="80" aria-label="Volume" title="Volume">
+    </div>
+  </div>
+  <div id="foot">
+    <select id="skinSel" aria-label="Overlay skin">
+      <option value="small">Small</option>
+      <option value="winamp">Winamp</option>
+      <option value="xbox">Xbox 360</option>
+      <option value="wmp">WMP 10</option>
+      <option value="ipod">iPod</option>
+      <option value="alien">Alien</option>
+      <option value="minimal">Minimal</option>
+    </select>
+    <div class="sp"></div>
+    <div class="hint">Space play &middot; Shift+&larr;&rarr; skip &middot; &uarr;&darr; vol &middot; L like &middot; Esc hide</div>
+  </div>
+  <div id="status"><div class="big" id="stBig">Connecting...</div><div class="small" id="stSmall">open the main app if this stays</div></div>
+</div>
+<script>
+(function() {
+  var wu = window.wickedUpdates;
+  if (!wu) return;
+
+  var S = {
+    settings: { skin: 'small', compact: false, volume: 0.8 },
+    state: { ok: false, playing: false, title: '', artist: '', art: null, pos: 0, dur: 0, hasTrack: false },
+    connected: false, lastStateAt: 0, el: {}
+  };
+
+  function $(id) { return document.getElementById(id); }
+  var E = { art:$('art'),title:$('title'),artist:$('artist'),pos:$('posEl'),dur:$('durEl'),
+    seek:$('seek'),seekFill:$('seekFill'),play:$('btnPlay'),prev:$('btnPrev'),next:$('btnNext'),
+    like:$('btnLike'),vol:$('vol'),skin:$('skinSel'),status:$('status'),stBig:$('stBig'),stSmall:$('stSmall') };
+
+  function applySkin(name) { root.className = (S.settings.compact ? 'compact ' : '') + 'skin-' + (name || 'small'); }
+  function applyCompact(c) { root.classList.toggle('compact', !!c); }
+
+  function fmt(sec) {
+    var n = Math.max(0, Math.floor(Number(sec) || 0));
+    var m = Math.floor(n / 60), s = n % 60;
+    return m + ':' + String(s).padStart(2, '0');
+  }
+
+  function render() {
+    var st = S.state;
+    if (!st || !st.ok) return;
+    E.status.style.display = 'none';
+    if (st.hasTrack) {
+      E.title.textContent = st.title;
+      E.artist.textContent = st.artist || '';
+      E.play.disabled = false; E.next.disabled = false; E.prev.disabled = false; E.seek.disabled = false;
+      E.play.innerHTML = st.playing ? '&#10074;&#10074;' : '&#9654;';
+      E.play.setAttribute('aria-label', st.playing ? 'Pause' : 'Play');
+      if (E.art.dataset.art !== (st.art || '')) {
+        E.art.dataset.art = st.art || '';
+        E.art.style.backgroundImage = st.art ? "url('" + st.art + "')" : 'none';
+      }
+      var pct = st.dur ? Math.min(100, (st.pos / st.dur) * 100) : 0;
+      E.seekFill.style.width = pct + '%';
+      E.seek.setAttribute('aria-valuenow', String(Math.round(pct)));
+      E.pos.textContent = fmt(st.pos);
+      E.dur.textContent = fmt(st.dur);
+    }
+  }
+
+  function setStatus(big, small) {
+    E.status.style.display = 'flex';
+    E.stBig.textContent = big;
+    E.stSmall.textContent = small;
+  }
+
+  /* IPC */
+  wu.onOverlayState(function (raw) {
+    if (!raw || typeof raw !== 'object') return;
+    S.connected = true; S.lastStateAt = Date.now(); S.state = raw; render();
+  });
+  wu.onOverlaySettings(function (d) {
+    if (!d) return;
+    if (d.skin) { S.settings.skin = d.skin; E.skin.value = d.skin; applySkin(d.skin); }
+    if (typeof d.compact === 'boolean') { S.settings.compact = d.compact; applyCompact(d.compact); }
+    if (typeof d.volume === 'number') { S.settings.volume = d.volume; E.vol.value = String(Math.round(d.volume * 100)); }
+  });
+
+  /* controls */
+  E.play.onclick = function () { if (!E.play.disabled) wu.overlayCmd({ type: 'toggle' }); };
+  E.next.onclick = function () { if (!E.next.disabled) wu.overlayCmd({ type: 'next' }); };
+  E.prev.onclick = function () { if (!E.prev.disabled) wu.overlayCmd({ type: 'prev' }); };
+  E.like.onclick = function () {
+    var liked = E.like.classList.contains('liked');
+    if (liked) { E.like.classList.remove('liked'); E.like.innerHTML = '&#9825;'; }
+    else { E.like.classList.add('liked'); E.like.innerHTML = '&#9829;'; }
+    wu.overlayCmd({ type: 'like' });
+  };
+  E.seek.onclick = function (e) {
+    if (E.seek.disabled) return;
+    var r = E.seek.getBoundingClientRect();
+    wu.overlayCmd({ type: 'seek', value: ((e.clientX - r.left) / r.width) * (S.state.dur || 0) });
+  };
+  E.vol.onchange = function () { wu.overlayCmd({ type: 'volume', value: parseInt(E.vol.value, 10) / 100 }); };
+  E.skin.onchange = function () {
+    S.settings.skin = E.skin.value; applySkin(E.skin.value);
+    try { localStorage.setItem('wp-overlay-skin', E.skin.value); } catch {}
+    wu.overlayCmd({ type: 'ui', skin: E.skin.value });
+  };
+  $('btnHide').onclick = function () { wu.winctl('overlay'); };
+  $('btnClose').onclick = function () { wu.winctl('overlay'); };
+
+  E.seek.addEventListener('keydown', function (e) {
+    if (E.seek.disabled) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); wu.overlayCmd({ type: 'seek', value: Math.min(S.state.dur || 0, (S.state.pos || 0) + 5) }); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); wu.overlayCmd({ type: 'seek', value: Math.max(0, (S.state.pos || 0) - 5) }); }
+  });
+
+  window.addEventListener('keydown', function (e) {
+    if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.code === 'Space') { e.preventDefault(); if (!E.play.disabled) wu.overlayCmd({ type: 'toggle' }); }
+    else if (e.code === 'ArrowRight' && e.shiftKey) { wu.overlayCmd({ type: 'next' }); }
+    else if (e.code === 'ArrowLeft' && e.shiftKey) { wu.overlayCmd({ type: 'prev' }); }
+    else if (e.code === 'ArrowUp') { e.preventDefault(); var v = Math.min(100, parseInt(E.vol.value, 10) + 5); E.vol.value = String(v); E.vol.onchange(); }
+    else if (e.code === 'ArrowDown') { e.preventDefault(); var v = Math.max(0, parseInt(E.vol.value, 10) - 5); E.vol.value = String(v); E.vol.onchange(); }
+    else if (e.key === 'l' || e.key === 'L') { E.like.onclick(); }
+    else if (e.key === 'Escape') { wu.winctl('overlay'); }
+  });
+
+  /* skin from storage */
+  try {
+    var saved = localStorage.getItem('wp-overlay-skin');
+    if (saved) { S.settings.skin = saved; E.skin.value = saved; }
+  } catch {}
+  applySkin(S.settings.skin);
+  applyCompact(S.settings.compact);
+
+  /* disconnected check */
+  setInterval(function () {
+    if (!S.connected) { setStatus('Not connected', 'open the main app first'); return; }
+    if (Date.now() - S.lastStateAt > 8000) {
+      S.connected = false;
+      setStatus('Player disconnected', 'open or restart the main app');
+    } else {
+      E.status.style.display = 'none';
+    }
+  }, 3000);
+
+  wu.overlayReady();
+})();
+</script>
+</body>
+</html>

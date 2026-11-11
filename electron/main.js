@@ -178,13 +178,16 @@ function createWindow() {
 
 /* ---------- external overlay window (draggable, works over games) ---------- */
 function createOverlay() {
+  var b = getSavedBounds();
   overlay = new BrowserWindow({
-    width: 440,
-    height: 190,
+    width: b ? b.width : 440,
+    height: b ? b.height : 190,
     minWidth: 240,
     minHeight: 60,
     maxWidth: 1400,
     maxHeight: 800,
+    x: b ? b.x : undefined,
+    y: b ? b.y : undefined,
     alwaysOnTop: true,
     frame: false,
     transparent: true,
@@ -192,38 +195,52 @@ function createOverlay() {
     resizable: true,
     hasShadow: false,
     show: false,
+    title: "Wicked Overlay",
     webPreferences: {
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, "preload.js"),
       backgroundThrottling: false,
     },
   });
-  overlay.setAlwaysOnTop(true, 'screen-saver');
+  overlay.setAlwaysOnTop(true, "screen-saver");
   overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlay.on('closed', () => { overlay = null; });
+  overlay.loadFile(path.join(__dirname, "overlay.html"));
+  overlay.on("closed", function () { overlay = null; });
+  overlay.on("moved", function () { saveOverlayBounds(); });
+  overlay.on("resized", function () { saveOverlayBounds(); });
+}
+
+function getSavedBounds() {
+  try {
+    var f = path.join(app.getPath("userData"), "overlay-bounds.json");
+    if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, "utf8"));
+  } catch {}
+  return null;
+}
+
+function saveOverlayBounds() {
+  if (!overlay || overlay.isDestroyed()) return;
+  try {
+    var f = path.join(app.getPath("userData"), "overlay-bounds.json");
+    fs.writeFileSync(f, JSON.stringify(overlay.getBounds()));
+  } catch {}
 }
 
 function showOverlay() {
-  const show = () => {
-    try {
-      overlay.showInactive();
-      overlay.setAlwaysOnTop(true, 'screen-saver');
-      overlay.moveTop();
-      startStateTimer();
-    } catch {}
-  };
-  // load fresh each time it's shown (fresh skin + state, no stale cache)
-  overlay.loadURL('http://localhost:5000/?wpoverlay=1&t=' + Date.now())
-    .then(show)
-    .catch(show);
+  if (!overlay || overlay.isDestroyed()) createOverlay();
+  if (!overlay) return;
+  overlay.show();
+  overlay.setAlwaysOnTop(true, "screen-saver");
+  overlay.moveTop();
 }
 
 function toggleOverlay() {
   if (overlay && overlay.isVisible()) { overlay.hide(); return; }
   if (!overlay) createOverlay();
   if (!overlay) return;
-  // only show once the backend can actually serve the overlay UI
-  ensureBackend().then(() => showOverlay());
+  overlay.show();
+  overlay.setAlwaysOnTop(true, "screen-saver");
+  overlay.moveTop();
 }
 
 /* ---------- IPC ---------- */
