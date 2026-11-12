@@ -432,6 +432,69 @@
     }
   }
 
+  /* ---- 7. EMPTY STATES ---- */
+  function improveEmptyStates() {
+    var root = document.getElementById("root");
+    if (!root) return;
+    var text = root.innerText || "";
+    if (text.indexOf("Nobody else online yet") !== -1) {
+      var els = root.querySelectorAll("*");
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].children.length === 0 && els[i].textContent.indexOf("Nobody else") !== -1 && els[i].parentElement && !els[i].parentElement.querySelector(".wp-empty-help")) {
+          var d = document.createElement("div"); d.className = "wp-empty-help"; d.style.cssText = "font-size:12px;color:rgba(244,242,255,.4);margin-top:8px;line-height:1.5;"; d.innerHTML = "Invite friends to download Wicked Player and create accounts. They will appear here when online."; els[i].parentElement.appendChild(d); break;
+        }
+      }
+    }
+  }
+  setInterval(improveEmptyStates, 4000);
+  /* ---- 10. LYRICS POLISH ---- */
+  setInterval(function() {
+    document.querySelectorAll(".lyric-line").forEach(function(l) { l.style.fontSize = "18px"; l.style.lineHeight = "2.2"; });
+    var ly = document.querySelector(".lyrics, [class*=\"lyrics\"]"); if (ly) { ly.style.maxHeight = "calc(100vh - 180px)"; ly.style.overflowY = "auto"; ly.style.padding = "20px 24px"; }
+  }, 1500);
+  /* ---- 11. REDUCE GLOW ---- */
+  setInterval(function() {
+    var bg = document.querySelector(".bg-art"); if (bg && !bg.dataset.wpG) { bg.dataset.wpG = "1"; bg.style.filter = "blur(80px) saturate(1.3) brightness(0.4)"; bg.style.opacity = "0.35"; }
+    document.querySelectorAll(".blob").forEach(function(b) { if (!b.dataset.wpG) { b.dataset.wpG = "1"; b.style.opacity = "0.15"; } });
+  }, 3000);
+  /* ---- 8. PREMIUM MESSAGING ---- */
+  var PF = { Cinematic: "Cinematic soundboard is Premium. Free packs: Classic, 8-Bit, Percussion.", Horror: "Horror soundboard is Premium.", shimmer: "Shimmer FX is Premium.", rainbow: "Rainbow FX is Premium.", animated: "Animated banners are Premium.", tag: "Custom tags are Premium.", glow: "Tag glow is Premium." };
+  var po = new MutationObserver(function() {
+    document.querySelectorAll('[class*="hint"], [class*="premium"]').forEach(function(el) {
+      if (el.dataset.wpF) return; var t = el.textContent || "";
+      if (t.indexOf("is Premium") !== -1 || t.indexOf("Premium feature") !== -1 || t.indexOf("Unlock with") !== -1) {
+        el.dataset.wpF = "1";
+        var par = el.closest('[class*="preset"], [class*="pack"], [class*="tag"], [class*="banner"]');
+        var ctx = par ? (par.textContent || "").slice(0, 80) : ""; var msg = "This feature requires Wicked Premium.";
+        for (var k in PF) { if (ctx.indexOf(k) !== -1) { msg = PF[k]; break; } }
+        el.textContent = msg; el.style.color = "rgba(216,180,254,.8)";
+      }
+    });
+  });
+  po.observe(document.documentElement, { childList: true, subtree: true });
+  /* ---- 9. SIDEBAR LABELS ---- */
+  setInterval(function() {
+    document.querySelectorAll(".nav-btn").forEach(function(btn) {
+      if (btn.dataset.wpL) return; btn.dataset.wpL = "1";
+      var title = btn.title || btn.getAttribute("aria-label") || ""; if (!title) return;
+      btn.setAttribute("aria-label", title);
+      var span = document.createElement("span"); span.className = "wp-nav-label"; span.textContent = title;
+      span.style.cssText = "position:absolute;left:100%;top:50%;transform:translateY(-50%);white-space:nowrap;background:rgba(18,16,31,.95);color:#f4f2ff;padding:5px 12px;border-radius:8px;font-size:12px;pointer-events:none;opacity:0;transition:opacity .15s;z-index:999";
+      btn.style.position = "relative"; btn.appendChild(span);
+      btn.addEventListener("mouseenter", function() { span.style.opacity = "1"; });
+      btn.addEventListener("mouseleave", function() { span.style.opacity = "0"; });
+    });
+  }, 2000);
+  /* ---- 10. LYRICS POLISH ---- */
+  setInterval(function() {
+    document.querySelectorAll(".lyric-line").forEach(function(l) { l.style.fontSize = "18px"; l.style.lineHeight = "2.2"; });
+    var ly = document.querySelector(".lyrics, [class*=\"lyrics\"]"); if (ly) { ly.style.maxHeight = "calc(100vh - 180px)"; ly.style.overflowY = "auto"; }
+  }, 1500);
+  /* ---- 11. REDUCE GLOW ---- */
+  setInterval(function() {
+    var bg = document.querySelector(".bg-art"); if (bg && !bg.dataset.wpG) { bg.dataset.wpG = "1"; bg.style.filter = "blur(80px) saturate(1.3) brightness(0.4)"; bg.style.opacity = "0.35"; }
+    document.querySelectorAll(".blob").forEach(function(b) { if (!b.dataset.wpG) { b.dataset.wpG = "1"; b.style.opacity = "0.15"; } });
+  }, 3000);
   })();
 
 /* ============================================================
