@@ -424,6 +424,81 @@
   var chip = document.getElementById("wp-chip");
   if (chip && !chip.querySelector("#wp-gift")) { var gb = document.createElement("button"); gb.id = "wp-gift"; gb.title = "Gifts"; gb.innerHTML = "\u{1F381}"; gb.onclick = function() { giftModal(); }; chip.insertBefore(gb, chip.querySelector("button")); }
   var bgBtn = document.createElement("button"); bgBtn.id = "wp-bg-btn"; bgBtn.title = "Background"; bgBtn.innerHTML = "\u{1F3A8}"; bgBtn.onclick = function() { bgPanel(); }; if (chip) chip.insertBefore(bgBtn, chip.querySelector("button"));
+  /* ============================================================
+     EQ PRESETS - one-click EQ configurations
+  ============================================================ */
+  var EQ_PRESETS = {
+    "Flat": [0,0,0,0,0,0,0],
+    "Bass Boost": [8,6,3,0,-1,-2,-3],
+    "Vocal": [-2,0,3,5,4,2,0],
+    "Rock": [5,3,-1,-2,2,4,5],
+    "Pop": [-1,2,4,4,2,0,-1],
+    "Electronic": [6,4,1,0,-2,3,5],
+    "Jazz": [3,2,1,2,-1,1,3],
+    "Classical": [4,3,2,1,-1,-1,2],
+    "Hip-Hop": [7,5,1,-2,-1,2,3],
+    "R&B": [4,3,1,0,-2,1,3]
+  };
+  function applyEQPreset(name) {
+    var preset = EQ_PRESETS[name]; if (!preset) return;
+    document.querySelectorAll(".eq-slider").forEach(function(slider, i) {
+      if (i < preset.length) { slider.value = preset[i]; slider.dispatchEvent(new Event("input", {bubbles:true})); slider.dispatchEvent(new Event("change", {bubbles:true})); }
+    });
+  }
+  function addEQPresetButtons() {
+    var eqSection = document.querySelector(".equalizer-section");
+    if (!eqSection || eqSection.querySelector(".wp-eq-presets")) return;
+    var container = document.createElement("div");
+    container.className = "wp-eq-presets";
+    container.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;margin:8px 0;padding:8px;background:rgba(255,255,255,.04);border-radius:10px;";
+    Object.keys(EQ_PRESETS).forEach(function(name) {
+      var btn = document.createElement("button"); btn.textContent = name;
+      btn.style.cssText = "background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;font-family:inherit;";
+      btn.onclick = function() { applyEQPreset(name); };
+      container.appendChild(btn);
+    });
+    eqSection.appendChild(container);
+  }
+  setInterval(addEQPresetButtons, 2000);
+  /* ---- SLEEP TIMER ---- */
+  var sleepTimer = null;
+  function setSleepTimer(minutes) {
+    if (sleepTimer) { clearTimeout(sleepTimer); sleepTimer = null; }
+    if (!minutes) return;
+    sleepTimer = setTimeout(function() { var a = document.querySelector("audio"); if (a) a.pause(); }, minutes * 60000);
+  }
+  function addSleepTimerButton() {
+    var bar = document.querySelector("[class*=\"bar-right\"], [class*=\"bar-btns\"]");
+    if (!bar || bar.querySelector(".wp-sleep-btn")) return;
+    var btn = document.createElement("button"); btn.className = "wp-sleep-btn"; btn.title = "Sleep timer";
+    btn.innerHTML = "\u{1F313}"; btn.style.cssText = "background:none;border:none;color:rgba(244,242,255,.5);cursor:pointer;font-size:14px;padding:4px;border-radius:6px;";
+    btn.onclick = function() {
+      var old = document.querySelector(".wp-sleep-drop"); if (old) { old.remove(); return; }
+      var drop = document.createElement("div"); drop.className = "wp-sleep-drop";
+      drop.style.cssText = "position:absolute;bottom:100%;right:0;background:rgba(18,16,31,.97);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:8px;z-index:1000;white-space:nowrap;";
+      [15,30,60,90,0].forEach(function(min) {
+        var b = document.createElement("div"); b.style.cssText = "padding:6px 12px;cursor:pointer;font-size:12px;color:#f4f2ff;border-radius:6px;";
+        b.textContent = min === 0 ? "Turn off timer" : min + " minutes";
+        b.onmouseover = function() { b.style.background = "rgba(168,85,247,.15)"; };
+        b.onmouseout = function() { b.style.background = ""; };
+        b.onclick = function() { setSleepTimer(min || 0); drop.remove(); };
+        drop.appendChild(b);
+      });
+      bar.style.position = "relative"; bar.appendChild(drop);
+      setTimeout(function() { document.addEventListener("click", function closeIt(e) { if (!drop.contains(e.target)) { drop.remove(); document.removeEventListener("click", closeIt); } }); }, 100);
+    };
+    bar.appendChild(btn);
+  }
+  setInterval(addSleepTimerButton, 2000);
+  /* ---- MAIN APP KEYBOARD SHORTCUTS ---- */
+  document.addEventListener("keydown", function(e) {
+    if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    var audio = document.querySelector("audio");
+    if (e.code === "Space") { e.preventDefault(); if (audio) { audio.paused ? audio.play().catch(function(){}) : audio.pause(); } }
+    else if (e.code === "ArrowRight" && e.shiftKey) { var nb = [].find.call(document.querySelectorAll("button"), function(b) { return (b.title||"") === "Next"; }); if (nb) nb.click(); }
+    else if (e.code === "ArrowLeft" && e.shiftKey) { var pb = [].find.call(document.querySelectorAll("button"), function(b) { return (b.title||"") === "Previous"; }); if (pb) pb.click(); }
+  });
   /* ============ PERF: preconnects ============ */
   for (const href of ['https://itunes.apple.com', 'https://api.deezer.com', 'https://i.scdn.co']) {
     if (!document.querySelector(`link[rel="preconnect"][href="${href}"]`)) {
