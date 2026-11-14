@@ -399,7 +399,7 @@
       }
     });
   });
-  po.observe(document.getElementById("root") || document.body, { childList: true, subtree: true });
+  po.observe(document.getElementById("root") || document.body || document.documentElement, { childList: true, subtree: true });
   /* ---- 9. SIDEBAR LABELS ---- */
   setInterval(function() {
     document.querySelectorAll(".nav-btn").forEach(function(btn) {
