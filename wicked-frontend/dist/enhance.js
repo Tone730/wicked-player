@@ -36,12 +36,25 @@
       }
       return _origFetch.apply(this, args).then((res) => {
         if (res.ok) {
-          res.clone().json().then((data) => { streamMem[key] = { at: Date.now(), data }; saveStream(); }).catch(() => {});
+          res.clone().json().then((data) => {
+            streamMem[key] = { at: Date.now(), data };
+            saveStream();
+            var audio = document.querySelector('audio');
+            if (audio) { if (data.video_id) audio.dataset.videoId = data.video_id; else delete audio.dataset.videoId; }
+          }).catch(() => {});
         }
         return res;
       });
     }
     return _origFetch.apply(this, args).then((res) => {
+      if (url.includes('/stream?q=')) {
+        res.clone().json().then(function (data) {
+          if (data.video_id) {
+            var audio = document.querySelector('audio');
+            if (audio) audio.dataset.videoId = data.video_id;
+          }
+        }).catch(function () {});
+      }
       if (res.status === 401 && !isOverlay) {
         res.clone().json().then((d) => {
           if (d && d.auth === true && d.error === 'Login required' && !document.getElementById('username')) {
@@ -499,6 +512,66 @@
     else if (e.code === "ArrowRight" && e.shiftKey) { var nb = [].find.call(document.querySelectorAll("button"), function(b) { return (b.title||"") === "Next"; }); if (nb) nb.click(); }
     else if (e.code === "ArrowLeft" && e.shiftKey) { var pb = [].find.call(document.querySelectorAll("button"), function(b) { return (b.title||"") === "Previous"; }); if (pb) pb.click(); }
   });
+  /* ============================================================
+     VIDEO SYNC - lock the YouTube panel to the music position
+  ============================================================ */
+  (function () {
+    if (isOverlay) return;
+    let anchor = 0, loadedAt = 0, seekTimer = null;
+    const audioEl = () => document.querySelector("audio");
+    const vFrame = () => document.querySelector(".video-panel iframe");
+    function vSend(fn, args) {
+      const f = vFrame();
+      if (f && f.contentWindow) { try { f.contentWindow.postMessage(JSON.stringify({ event: "command", func: fn, args: args || [] }), "*"); } catch {} }
+    }
+    function vBuild(vid, start) {
+      let u = "https://www.youtube.com/embed/" + vid + "?autoplay=1&mute=1&enablejsapi=1&start=" + Math.max(0, Math.floor(start || 0));
+      try { if (location.protocol.indexOf("http") === 0 && location.origin !== "null") u += "&origin=" + encodeURIComponent(location.origin); } catch {}
+      return u;
+    }
+    function vReload(vid, start) {
+      const f = vFrame(); if (!f || !vid) return;
+      f.setAttribute("src", vBuild(vid, start));
+      anchor = Math.floor(start || 0); loadedAt = Date.now();
+    }
+    /* panel opened / track changed -> embed exact video at the music position */
+    setInterval(function () {
+      const f = vFrame(), a = audioEl();
+      if (!f || !a) return;
+      const vid = a.dataset.videoId || "";
+      if (!vid) return;
+      const src = f.getAttribute("src") || "";
+      if (src.indexOf("enablejsapi=1") === -1 || src.indexOf("/" + vid + "?") === -1) {
+        vReload(vid, a.currentTime);
+        if (!a.paused) vSend("playVideo");
+      }
+    }, 700);
+    /* drift correction while playing */
+    setInterval(function () {
+      const f = vFrame(), a = audioEl();
+      if (!f || !a || a.paused) return;
+      const vid = a.dataset.videoId || ""; if (!vid) return;
+      if (Math.abs(a.currentTime - (anchor + (Date.now() - loadedAt) / 1000)) > 3) vReload(vid, a.currentTime);
+    }, 3000);
+    /* play / pause / seek follow */
+    document.addEventListener("play", function (e) {
+      if (e.target && e.target.tagName === "AUDIO") { if (!loadedAt) { anchor = e.target.currentTime; loadedAt = Date.now(); } vSend("playVideo"); }
+    }, true);
+    document.addEventListener("pause", function (e) {
+      if (e.target && e.target.tagName === "AUDIO") { anchor = e.target.currentTime; loadedAt = Date.now(); vSend("pauseVideo"); }
+    }, true);
+    document.addEventListener("seeked", function (e) {
+      if (e.target && e.target.tagName === "AUDIO") {
+        const a = e.target;
+        if (seekTimer) clearTimeout(seekTimer);
+        seekTimer = setTimeout(function () {
+          const vid = a.dataset.videoId || ""; if (!vid || !vFrame()) return;
+          vReload(vid, a.currentTime);
+          if (!a.paused) vSend("playVideo");
+        }, 350);
+      }
+    }, true);
+  })();
   /* ============ PERF: preconnects ============ */
   for (const href of ['https://itunes.apple.com', 'https://api.deezer.com', 'https://i.scdn.co']) {
     if (!document.querySelector(`link[rel="preconnect"][href="${href}"]`)) {
@@ -740,6 +813,7 @@
 
   function applySkin(name) {
     root.className = (S.settings.compact ? "ov-root compact skin-" : "ov-root skin-") + (name || "winamp");
+    if (S.videoOn) root.classList.add("video");
   }
   function applyCompact(c) {
     root.classList.toggle("compact", !!c);
@@ -753,8 +827,9 @@
 
   function render() {
     const st = S.state;
-    if (!st.ok) return;
-    if (st.hasTrack) {
+    if (st.ok === false) return;
+    const hasTrack = st.hasTrack !== undefined ? !!st.hasTrack : !!(st.title || st.artist || st.dur);
+    if (hasTrack) {
       E.status.style.display = "none";
       E.title.textContent = st.title;
       E.artist.textContent = st.artist || "";
@@ -824,7 +899,78 @@
     applySkin(E.skin.value);
     wu.overlayCmd({ type: "ui", skin: E.skin.value });
   };
-  $("ovHide").onclick = function () { wu.winctl("overlay"); };
+  /* ---------- video mode ---------- */
+  const vcss = document.createElement("style");
+  vcss.textContent = [
+    "#ovVideoWrap{display:none;flex:1;flex-direction:column;min-height:0;padding:0 10px 8px}",
+    "#ovRoot.video #ovVideoWrap{display:flex}",
+    "#ovRoot.video #ovBody{display:none}",
+    "#ovRoot.video #ovSeek{display:none}",
+    "#ovVideoWrap iframe{flex:1;width:100%;min-height:0;border:0;border-radius:10px;background:#000}",
+    "#ovVideoWrap .vnone{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;color:rgba(244,242,255,.55);font-size:12px;text-align:center;padding:8px}",
+    "#ovVideo{font-size:13px}#ovVideo.on{color:#a855f7}"
+  ].join("\n");
+  document.head.appendChild(vcss);
+  const vWrap = document.createElement("div");
+  vWrap.id = "ovVideoWrap";
+  vWrap.innerHTML = '<div class="vnone"><b>No video playing</b></div>';
+  root.appendChild(vWrap);
+  const vBtn = document.createElement("button");
+  vBtn.id = "ovVideo";
+  vBtn.title = "Video panel";
+  vBtn.setAttribute("aria-label", "Toggle video panel");
+  vBtn.innerHTML = "&#127916;";
+  const sb = document.getElementById("ovSettings");
+  if (sb && sb.parentNode) sb.parentNode.insertBefore(vBtn, sb); else document.getElementById("ovDrag").appendChild(vBtn);
+  const V = { vid: "", loadedAt: 0, anchor: 0, wasPlaying: null, lastDrift: 0 };
+  function vFrame() { return vWrap.querySelector("iframe"); }
+  function vSend(fn, args) {
+    const f = vFrame();
+    if (f && f.contentWindow) { try { f.contentWindow.postMessage(JSON.stringify({ event: "command", func: fn, args: args || [] }), "*"); } catch {} }
+  }
+  function vBuild(vid, start) {
+    return "https://www.youtube.com/embed/" + vid + "?autoplay=1&mute=1&controls=1&enablejsapi=1&start=" + Math.max(0, Math.floor(start || 0));
+  }
+  function vMount(vid, start) {
+    vWrap.innerHTML = "";
+    const f = document.createElement("iframe");
+    f.src = vBuild(vid, start);
+    f.allow = "autoplay; encrypted-media; picture-in-picture";
+    f.setAttribute("allowfullscreen", "");
+    vWrap.appendChild(f);
+    V.vid = vid; V.anchor = Math.floor(start || 0); V.loadedAt = Date.now();
+  }
+  function setVideoMode(on) {
+    S.videoOn = !!on;
+    root.classList.toggle("video", S.videoOn);
+    vBtn.classList.toggle("on", S.videoOn);
+    wu.overlayCmd({ type: "video", on: S.videoOn });
+    if (!S.videoOn) { vWrap.innerHTML = ""; V.vid = ""; }
+    else vSync();
+  }
+  function vSync() {
+    if (!S.videoOn) return;
+    const st = S.state;
+    const live = st && st.ok !== false && (st.hasTrack === undefined ? !!(st.title || st.dur) : !!st.hasTrack);
+    const vid = live ? (st.videoId || "") : "";
+    if (!vid) {
+      if (!vWrap.querySelector(".vnone")) vWrap.innerHTML = '<div class="vnone"><b>No video for this track</b><span style="font-size:10px;opacity:.6">open the video panel in the main player once, then this follows the music</span></div>';
+      V.vid = ""; return;
+    }
+    if (V.vid !== vid) { vMount(vid, st.pos || 0); V.wasPlaying = null; return; }
+    const f = vFrame(); if (!f) return;
+    if (V.wasPlaying !== null && st.playing !== V.wasPlaying) vSend(st.playing ? "playVideo" : "pauseVideo");
+    V.wasPlaying = st.playing;
+    const now = Date.now();
+    if (now - V.lastDrift > 3000) {
+      V.lastDrift = now;
+      const elapsed = st.playing ? (now - V.loadedAt) / 1000 : 0;
+      if (Math.abs((st.pos || 0) - (V.anchor + elapsed)) > 3) vMount(vid, st.pos || 0);
+    }
+  }
+  vBtn.onclick = function () { setVideoMode(!S.videoOn); };
+  setInterval(vSync, 600);
+    $("ovHide").onclick = function () { wu.winctl("overlay"); };
   $("ovClose").onclick = function () { wu.winctl("overlay"); };
   $("ovSettings").onclick = function () {
     const panel = document.getElementById("ovSettingsPanel");

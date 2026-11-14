@@ -266,15 +266,18 @@ function readPlayerState() {
         if (img) art = img.src;
         else {
           const el = document.querySelector('[class*="track-art"] [style*="background"]');
-          if (el) { const m = /url\(["']?([^"')]+)/.exec(el.style.backgroundImage || ''); if (m) art = m[1]; }
+          if (el) { const m = /url\\(["']?([^"')]+)/.exec(el.style.backgroundImage || ''); if (m) art = m[1]; }
         }
         return JSON.stringify({
+          ok: true,
           playing: a ? !a.paused : false,
           title: lines[0] || '',
           artist: lines[1] || '',
           art: art,
           pos: a ? a.currentTime : 0,
-          dur: a ? (a.duration || 0) : 0
+          dur: a ? (a.duration || 0) : 0,
+          hasTrack: !!(lines[0] || a),
+          videoId: a ? (a.dataset.videoId || '') : ''
         });
       })()`,
       false
@@ -312,7 +315,7 @@ function runOverlayCmd(cmd) {
       `(() => { const a = document.querySelector('audio');
         if (a) { a.paused ? a.play().catch(()=>{}) : a.pause(); }
         else { const bs=[...document.querySelectorAll('button')];
-               const pl=bs.find(b=>/^\s*(play|pause)\s*$/i.test(b.getAttribute('aria-label')||b.title||b.textContent||''));
+               const pl=bs.find(b=>/^\\s*(play|pause)\\s*$/i.test(b.getAttribute('aria-label')||b.title||b.textContent||''));
                if(pl) pl.click(); } })()`
     );
   } else if (c === 'play') {
@@ -326,6 +329,23 @@ function runOverlayCmd(cmd) {
   } else if (c === 'seek') {
     const v = Number(cmd.value || 0);
     execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.currentTime=${v}; })()`);
+  } else if (c === 'video') {
+    /* overlay video mode: grow the window, restore on exit */
+    if (overlay && !overlay.isDestroyed()) {
+      try {
+        if (cmd.on) {
+          const b = overlay.getBounds();
+          if (!overlay.__vidRestore) overlay.__vidRestore = { x: b.x, y: b.y, width: b.width, height: b.height };
+          overlay.setMinimumSize(400, 300);
+          overlay.setBounds({ x: b.x, y: Math.max(0, b.y - 160), width: 500, height: 356 });
+        } else {
+          overlay.setMinimumSize(280, 64);
+          const r = overlay.__vidRestore;
+          if (r) overlay.setBounds(r);
+          overlay.__vidRestore = null;
+        }
+      } catch {}
+    }
   } else if (c === 'close-overlay') {
     toggleOverlay();
   }
