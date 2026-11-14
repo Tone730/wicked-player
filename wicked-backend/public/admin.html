@@ -130,6 +130,13 @@
     <h3 style="margin:10px 0 8px;font-size:14px;">Pending requests</h3>
     <table><thead><tr><th>USER</th><th>MESSAGE</th><th>REQUESTED</th><th>ACTIONS</th></tr></thead>
     <tbody id="premReqRows"></tbody></table>
+    <h3 style="margin:18px 0 8px;font-size:14px;">Grant premium directly</h3>
+    <div class="toolbar" style="gap:6px;flex-wrap:wrap;">
+      <input id="grantUser" placeholder="username (must be registered)" style="flex:1;min-width:200px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px 10px;font-family:inherit;">
+      <button class="abtn" onclick="grant('lifetime')">✨ Lifetime</button>
+      <button class="abtn" onclick="grant(30)">30d</button>
+      <button class="abtn" onclick="grant(7)">7d</button>
+    </div>
     <h3 style="margin:18px 0 8px;font-size:14px;">Active premium</h3>
     <table><thead><tr><th>USER</th><th>UNTIL</th><th>SOURCE</th><th>ACTIONS</th></tr></thead>
     <tbody id="premActiveRows"></tbody></table>
@@ -310,10 +317,11 @@
         return '<tr><td><b>' + esc(r.user) + '</b></td><td>' + esc(r.message || '') + '</td><td style="color:var(--muted)">' + ago(r.at) + '</td>' +
           '<td><div class="actions"><button class="abtn" onclick="decide(\'' + esc(r.user) + '\',\'approve\',30)">Approve 30d</button>' +
           '<button class="abtn" onclick="decide(\'' + esc(r.user) + '\',\'approve\',7)">7d</button>' +
+          '<button class="abtn" onclick="decide(\'' + esc(r.user) + '\',\'approve\',\'lifetime\')">✨ Lifetime</button>' +
           '<button class="abtn danger" onclick="decide(\'' + esc(r.user) + '\',\'deny\')">Deny</button></div></td></tr>';
       }).join('') || '<tr><td colspan="4" style="color:var(--muted)">No pending requests</td></tr>';
       document.getElementById('premActiveRows').innerHTML = active.map(function (a) {
-        return '<tr><td><b>' + esc(a.user) + '</b></td><td>' + (a.permanent ? 'permanent' : new Date(a.until).toLocaleDateString()) + '</td>' +
+        return '<tr><td><b>' + esc(a.user) + '</b></td><td>' + (a.permanent ? '✨ lifetime' : new Date(a.until).toLocaleDateString()) + '</td>' +
           '<td style="color:var(--muted);font-size:12px">' + esc(a.source || '') + '</td>' +
           '<td><button class="abtn danger" onclick="revoke(\'' + esc(a.user) + '\')">Revoke</button></td></tr>';
       }).join('') || '<tr><td colspan="4" style="color:var(--muted)">Nobody has active premium</td></tr>';
@@ -321,6 +329,16 @@
         return '<tr><td>' + esc(r.user) + '</td><td>' + esc(r.code) + '</td><td>' + r.days + 'd</td><td>' + esc(r.status) + '</td><td style="color:var(--muted)">' + ago(r.at) + '</td></tr>';
       }).join('') || '<tr><td colspan="5" style="color:var(--muted)">No redemptions yet</td></tr>';
     } catch (e) { alert('Failed: ' + e.message); }
+  }
+  async function grant(days) {
+    const user = (document.getElementById('grantUser').value || '').trim();
+    if (!user) return alert('Enter a username first');
+    try {
+      const r = await api('/admin/api/premium-grant', { user: user, days: days });
+      document.getElementById('grantUser').value = '';
+      alert(r.lifetime ? user + ' now has LIFETIME premium' : user + ' got ' + days + ' days of premium');
+      loadPremium();
+    } catch (e) { alert(e.message); }
   }
   async function decide(user, decision, days) {
     try { await api('/admin/api/premium-request/decide', { user: user, decision: decision, days: days }); loadPremium(); }

@@ -189,7 +189,7 @@ router.post('/auth/register', (req, res) => {
   }
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
-  if (!/^[a-zA-Z0-9_\-\.]{2,20}$/.test(username)) {
+  if (!/^[a-zA-Z0-9_.-]{2,20}$/.test(username)) {
     return res.status(400).json({ error: 'Username: 2-20 chars, letters/numbers/_ - .' });
   }
   if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
@@ -284,7 +284,7 @@ router.get('/auth/discord/callback', async (req, res) => {
       return res.redirect('/');
     }
     // auto-register an account named after the discord user
-    let uname = (d.global_name || d.username || 'discord-user').replace(/[^a-zA-Z0-9_\-\.]/g, '').slice(0, 20) || 'discord-user';
+    let uname = (d.global_name || d.username || 'discord-user').replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 20) || 'discord-user';
     while (users[uname]) uname = uname.slice(0, 16) + '_' + crypto.randomBytes(2).toString('hex');
     users[uname] = { passHash: '', salt: '', role: 'user', createdAt: Date.now(), banned: false, discord: profile, discordOnly: true };
     saveUsers();
@@ -400,6 +400,7 @@ router.get("/admin/api/premium-requests", requireAdmin, function (_req, res) {
 });
 router.post("/admin/api/premium-request/decide", requireAdmin, function (req, res) {
   const user = String(req.body.user || "");
+  const lifetime = req.body.days === "lifetime" || req.body.lifetime === true;
   const decision = req.body.decision === "approve" ? "approved" : "denied";
   const reqs = readJsonSafe(path.join(DATA_DIR, "premium-requests.json"), []);
   const entry = reqs.find(function (r) { return r.user === user && r.status === "pending"; });
@@ -411,15 +412,49 @@ router.post("/admin/api/premium-request/decide", requireAdmin, function (req, re
     const comm = readJsonSafe(COMM_FILE, { profiles: {} });
     comm.profiles = comm.profiles || {};
     const prof = comm.profiles[user] || {};
-    const d = Number(req.body.days) || 30;
-    const prevUntil = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : Date.now();
-    prof.premium = true;
-    prof.premiumUntil = prevUntil + d * 86400000;
-    prof.premiumSource = "admin-approved";
+    if (lifetime) {
+      prof.premium = true;
+      prof.premiumUntil = null;
+      prof.premiumSource = "admin-lifetime";
+    } else {
+      const d = Number(req.body.days) || 30;
+      const prevUntil = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : Date.now();
+      prof.premium = true;
+      prof.premiumUntil = prevUntil + d * 86400000;
+      prof.premiumSource = "admin-approved";
+    }
     comm.profiles[user] = prof;
     fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
   }
-  res.json({ ok: true, decision: decision });
+  res.json({ ok: true, decision: decision, lifetime: lifetime });
+});
+
+/* grant premium directly to any registered account — no pending request needed */
+router.post("/admin/api/premium-grant", requireAdmin, function (req, res) {
+  const user = String(req.body.user || "").trim();
+  if (!user) return res.status(400).json({ error: "Username required" });
+  if (!users[user]) return res.status(404).json({ error: "No account named '" + user + "' — they must sign up first" });
+  const lifetime = req.body.days === "lifetime" || req.body.lifetime === true;
+  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  comm.profiles = comm.profiles || {};
+  const prof = comm.profiles[user] || {};
+  if (lifetime) {
+    prof.premium = true;
+    prof.premiumUntil = null;
+    prof.premiumSource = "admin-lifetime";
+  } else {
+    var d = Number(req.body.days) || 30;
+    const prevUntil = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : Date.now();
+    prof.premium = true;
+    prof.premiumUntil = prevUntil + d * 86400000;
+    prof.premiumSource = "admin-grant";
+  }
+  comm.profiles[user] = prof;
+  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  const log = readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []);
+  log.unshift({ user: user, code: lifetime ? "admin-lifetime" : "admin-grant:" + d + "d", days: lifetime ? 0 : d, at: Date.now(), status: "active", until: prof.premiumUntil || null });
+  fs.writeFileSync(path.join(DATA_DIR, "redemptions.json"), JSON.stringify(log.slice(0, 200), null, 2));
+  res.json({ ok: true, user: user, lifetime: lifetime, until: prof.premiumUntil || null });
 });
 
 router.get("/admin/api/premium-active", requireAdmin, function (_req, res) {
@@ -506,7 +541,7 @@ router.post('/admin/api/create', requireAdmin, (req, res) => {
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
   const role = req.body.role === 'admin' ? 'admin' : 'user';
-  if (!/^[a-zA-Z0-9_\-\.]{2,20}$/.test(username)) return res.status(400).json({ error: 'bad username' });
+  if (!/^[a-zA-Z0-9_.-]{2,20}$/.test(username)) return res.status(400).json({ error: 'bad username' });
   if (password.length < 4) return res.status(400).json({ error: 'password too short (4+)' });
   if (users[username]) return res.status(409).json({ error: 'username taken' });
   const { salt, hash } = hashPassword(password);
