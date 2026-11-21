@@ -4,9 +4,9 @@ Ad-free music player with effects, lyrics, overlays, community profiles and Disc
 
 ## Download / Update
 
-**Latest release (v3.5.10):** https://github.com/Tone730/wicked-player/releases/latest
+**Latest release (v3.5.11):** https://github.com/Tone730/wicked-player/releases/latest
 
-Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.10.exe
+Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.11.exe
 
 Install once and the app auto-updates from GitHub (`latest.yml`). Existing installs from 3.5.0 onward pick up new releases automatically.
 
@@ -24,10 +24,12 @@ Install once and the app auto-updates from GitHub (`latest.yml`). Existing insta
 
 ![Wicked Player Discord presence settings](docs/screenshots/04-presence.png)
 
-## What's in v3.5.10
+## What's in v3.5.11
 
-- **Track-aware Discord presence** — your Discord activity now always shows the song title and artist that is actually playing, even when you have custom profile presence text.
-- **Album art in presence** — the large presence image is the artwork of the current track; the small icon now uses a valid hosted image asset.
+- **Reliable cover art** — fixed the player state probe so Discord actually receives the current track's title, artist and album art instead of silently getting no state.
+- **Faster startup** — hosted mode reads the saved home server directly and skips the bundled backend wait entirely.
+- **Lower CPU usage** — state polling dropped from 500 ms to 1 s, with duplicate overlay and tray updates skipped.
+- **Track-aware Discord presence** — your Discord activity shows the song title and artist that is actually playing, even when you have custom profile presence text.
 - **Auto-configured Discord presence** — profile-driven details, state, buttons and paused status, with reconnect/retry.
 - **CustomRP preset export** — generate a `.crp` file for your own profile or a friend's public profile.
 - **Profile Studio** — banners, animated/glowing tags, motion backgrounds, card shapes and premium effects.

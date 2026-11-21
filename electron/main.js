@@ -6,6 +6,8 @@ const http = require('http');
 const fs = require('fs');
 const { globalShortcut } = require('electron');
 
+const HOSTED_HOME = 'https://wickedplayer.dev';
+
 let win = null;
 let overlay = null;
 let backendProc = null;
@@ -69,6 +71,20 @@ function fetchHomeServer() {
     req.on('timeout', () => { req.destroy(); resolve('https://wickedplayer.dev'); });
     req.on('error', () => resolve('https://wickedplayer.dev'));
   });
+}
+
+/* Startup fast path: read the saved home server from disk instead of waiting
+   on a local backend HTTP round-trip. Hosted users never need that backend. */
+function readHomeServerPref() {
+  try {
+    const prefs = JSON.parse(fs.readFileSync(path.join(dataDir(), 'local-prefs.json'), 'utf8'));
+    const home = prefs && prefs.homeServer;
+    if (home && /^https?:\/\//i.test(home)) return String(home).replace(/\/+$/, '');
+  } catch {}
+  return HOSTED_HOME;
+}
+function isLocalHome(url) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/i.test(String(url || ''));
 }
 
 /* ---------- discord rich presence ---------- */
@@ -183,16 +199,24 @@ function setPresence(track, playing, force) {
     ? clip(artist + '  ·  ' + (customState || 'Wicked Player'), 120)
     : (customState || clip('Wicked Player' + (isPlaying ? '' : '  ·  paused'), 120));
   const asHttps = (u) => String(u || '').replace(/^http:\/\//i, 'https://');
+  const safeUrl = (u) => {
+    const v = asHttps(u);
+    return /^https?:\/\//i.test(v) ? v : '';
+  };
   const fallbackIcon = 'https://raw.githubusercontent.com/Tone730/wicked-player/master/electron/icon.png';
-  const artUrl = asHttps((track && track.art) || '');
-  const smallIcon = /^https?:\/\//i.test(prof.avatar || '') ? asHttps(prof.avatar) : fallbackIcon;
+  /* The current track's artwork always wins. Profile art is only a fallback. */
+  const artUrl = safeUrl(track && track.art) || safeUrl(prof.image) || safeUrl(prof.banner) || fallbackIcon;
+  const smallIcon = safeUrl(prof.avatar) || fallbackIcon;
   const activity = {
     type: 2, // Discord activity type 2 = "Listening to"
     details: details,
     state: state,
     startTimestamp: presenceStart,
-    largeImageKey: clip(artUrl || asHttps(prof.image) || asHttps(prof.banner) || fallbackIcon, 256),
-    largeImageText: clip(((album ? album + ' · ' : '') + name + ' · Wicked Player'), 120),
+    largeImageKey: clip(artUrl, 256),
+    largeImageText: clip(
+      (album ? album + ' · ' : '') + name + (artist ? ' · ' + artist : '') + ' · Wicked Player',
+      120
+    ),
     smallImageKey: clip(smallIcon, 256),
     smallImageText: isPlaying ? 'Playing in Wicked Player' : 'Paused in Wicked Player',
     instance: false,
@@ -298,17 +322,21 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => { uiLoaded = true; });
   win.on('closed', () => { win = null; });
 
-  /* load through the backend's login gate — or a remote server if set
-     (hosted mode: friends point their app at the host's server) */
-  ensureBackend().then(() => {
+  const loadHome = (homeUrl) => {
     initDiscord();
-    fetchHomeServer().then((homeUrl) => {
-      win.loadURL(homeUrl + '/');
-      setTimeout(() => {
-        if (!uiLoaded) { try { shell.openExternal(homeUrl); } catch {} }
-      }, 15000);
-    });
-  });
+    try { win.loadURL(homeUrl + '/'); } catch {}
+    setTimeout(() => {
+      if (!uiLoaded) { try { shell.openExternal(homeUrl); } catch {} }
+    }, 15000);
+  };
+
+  const homeUrl = readHomeServerPref();
+  /* Hosted mode skips the bundled backend entirely — no 15s startup wait. */
+  if (!isLocalHome(homeUrl)) {
+    loadHome(homeUrl);
+    return;
+  }
+  ensureBackend().then(() => loadHome(homeUrl));
 }
 
 /* ---------- external overlay window (draggable, works over games) ---------- */
@@ -401,33 +429,76 @@ ipcMain.handle('presence:status', () => ({
    the game's way. */
 let stateTimer = null;
 let lastPresenceAt = 0;
+let lastPresenceArt = '';
+let lastOverlaySignature = '';
+let lastTraySignature = '';
+
+/* A real function is used (instead of a template string) so escapes such as
+   \n and regex groups survive verbatim via Function.prototype.toString(). */
+function playerStateProbe() {
+  const a = document.querySelector('audio');
+  const bar = document.querySelector(
+    'footer, [class*="foobar"], [class*="bar-center"], [class*="player-bar"]'
+  );
+  const lines = (bar ? (bar.innerText || '') : '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => (
+      s && s !== '🎁' && !/^\d+(\.\d+)?\s*kbps$/i.test(s) && !/^\d+:\d{2}(:\d{2})?$/.test(s)
+    ));
+
+  const normalize = (v) => {
+    if (!v) return '';
+    let u = String(v).trim();
+    if (u.charAt(0) === '/' && u.charAt(1) !== '/') return location.origin + u;
+    if (u.indexOf('//') === 0) return 'https:' + u;
+    return /^https?:\/\//i.test(u) ? u : '';
+  };
+  const fromImage = () => {
+    const img = document.querySelector(
+      'footer img, [class*="foobar"] img, [class*="bar-center"] img, ' +
+      '[class*="now-playing"] img, [class*="track-art"] img, ' +
+      'img[alt*="cover" i], img[alt*="art" i]'
+    );
+    return img ? normalize(img.currentSrc || img.src) : '';
+  };
+  const fromBackground = () => {
+    const nodes = document.querySelectorAll(
+      '[class*="art"] [style*="background"], [class*="cover"] [style*="background"], [style*="background-image"]'
+    );
+    for (const el of nodes) {
+      const m = /url\(["']?([^"')]+)/.exec(el.style.backgroundImage || '');
+      if (m && m[1]) {
+        const u = normalize(m[1].replace(/["']+$/, ''));
+        if (u) return u;
+      }
+    }
+    return '';
+  };
+  const fromMeta = () => {
+    const m = document.querySelector('meta[property="og:image"], meta[name="twitter:image"]');
+    return m ? normalize(m.content) : '';
+  };
+  const art =
+    normalize(window.__WP_PRESENCE_ART || window.__WP_CURRENT_ART || '') ||
+    fromImage() || fromBackground() || fromMeta();
+
+  return {
+    playing: a ? !a.paused : false,
+    title: lines[0] || '',
+    artist: lines[1] || '',
+    art,
+    pos: a ? a.currentTime : 0,
+    dur: a ? (a.duration || 0) : 0,
+  };
+}
+const PLAYER_STATE_SCRIPT = '(' + playerStateProbe.toString() + ')()';
 
 function readPlayerState() {
-  return win?.webContents
-    ?.executeJavaScript(
-      `(() => {
-        const a = document.querySelector('audio');
-        const bar = document.querySelector('footer, [class*="foobar"], [class*="bar-center"]');
-        const lines = (bar ? (bar.innerText || '') : '').split('\n').map(s => s.trim()).filter(Boolean);
-        let art = null;
-        const img = document.querySelector('footer img, [class*="track-art"] img');
-        if (img) art = img.src;
-        else {
-          const el = document.querySelector('[class*="track-art"] [style*="background"]');
-          if (el) { const m = /url\(["']?([^"')]+)/.exec(el.style.backgroundImage || ''); if (m) art = m[1]; }
-        }
-        return JSON.stringify({
-          playing: a ? !a.paused : false,
-          title: lines[0] || '',
-          artist: lines[1] || '',
-          art: art,
-          pos: a ? a.currentTime : 0,
-          dur: a ? (a.duration || 0) : 0
-        });
-      })()`,
-      false
-    )
-    .then((r) => { try { return JSON.parse(r); } catch { return null; } })
+  if (!win || !win.webContents || win.webContents.isDestroyed()) return Promise.resolve(null);
+  return win.webContents
+    .executeJavaScript(PLAYER_STATE_SCRIPT, false)
+    .then((r) => (r && typeof r === 'object' ? r : null))
     .catch(() => null);
 }
 
@@ -435,18 +506,37 @@ async function pushOverlayState() {
   if (!win) return;
   const st = await readPlayerState();
   if (!st) return;
-  if (overlay && overlay.isVisible()) { try { overlay.webContents.send('overlay:state', st); } catch {} }
-  // discord presence + tray tooltip ride the same poll (2s refresh)
-  if (st.title && Date.now() - lastPresenceAt > 2000) {
+
+  /* The overlay only needs a redraw when something visible changes. */
+  const overlaySig = [st.title, st.artist, st.art, st.playing, Math.floor(st.pos)].join('|');
+  if (overlaySig !== lastOverlaySignature) {
+    lastOverlaySignature = overlaySig;
+    if (overlay && overlay.isVisible()) {
+      try { overlay.webContents.send('overlay:state', st); } catch {}
+    }
+  }
+
+  if (!st.title) return;
+  /* Art can arrive after the track starts. Push it immediately when it does. */
+  const artArrived = !!st.art && st.art !== lastPresenceArt;
+  if (artArrived) lastPresenceArt = st.art;
+  if (Date.now() - lastPresenceAt > 1000 || artArrived) {
     lastPresenceAt = Date.now();
-    setPresence({ name: st.title, artist: st.artist, album: '', art: st.art, elapsed: st.pos }, st.playing);
-    updateTray({ name: st.title, artist: st.artist }, st.playing);
+    setPresence(
+      { name: st.title, artist: st.artist, album: '', art: st.art, elapsed: st.pos },
+      st.playing
+    );
+    const traySig = st.title + '|' + st.artist + '|' + st.playing;
+    if (traySig !== lastTraySignature) {
+      lastTraySignature = traySig;
+      updateTray({ name: st.title, artist: st.artist }, st.playing);
+    }
   }
 }
 
 function startStateTimer() {
   if (stateTimer) return;
-  stateTimer = setInterval(() => { pushOverlayState().catch(() => {}); }, 500);
+  stateTimer = setInterval(() => { pushOverlayState().catch(() => {}); }, 1000);
 }
 
 function execDriver(js) {
