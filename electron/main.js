@@ -169,14 +169,31 @@ function setPresence(track, playing, force) {
     lastTrackKey = key;
     presenceStart = Math.floor(Date.now() / 1000) - pos;
   }
+  /* The track always wins: Discord must show what is actually playing,
+     even when a profile supplies custom presence text or artwork. */
+  const customDetails = clip(prof.details || '', 120);
+  const customState = clip(prof.state || '', 120);
+  const songLine = (isPlaying ? '▶ ' : '⏸ ') + name;
+  const details = customDetails
+    ? (customDetails.toLowerCase().includes(name.toLowerCase())
+        ? customDetails
+        : clip(customDetails + '  ·  ' + songLine, 120))
+    : songLine;
+  const state = artist
+    ? clip(artist + '  ·  ' + (customState || 'Wicked Player'), 120)
+    : (customState || clip('Wicked Player' + (isPlaying ? '' : '  ·  paused'), 120));
+  const asHttps = (u) => String(u || '').replace(/^http:\/\//i, 'https://');
+  const fallbackIcon = 'https://raw.githubusercontent.com/Tone730/wicked-player/master/electron/icon.png';
+  const artUrl = asHttps((track && track.art) || '');
+  const smallIcon = /^https?:\/\//i.test(prof.avatar || '') ? asHttps(prof.avatar) : fallbackIcon;
   const activity = {
     type: 2, // Discord activity type 2 = "Listening to"
-    details: clip(prof.details || ((isPlaying ? '▶ ' : '⏸ ') + name), 120),
-    state: clip(prof.state || ([artist, 'Wicked Player' + (isPlaying ? '' : ' · paused')].filter(Boolean).join(' · ')), 120),
+    details: details,
+    state: state,
     startTimestamp: presenceStart,
-    largeImageKey: clip(prof.image || (track && track.art) || 'wicked', 256),
+    largeImageKey: clip(artUrl || asHttps(prof.image) || asHttps(prof.banner) || fallbackIcon, 256),
     largeImageText: clip(((album ? album + ' · ' : '') + name + ' · Wicked Player'), 120),
-    smallImageKey: clip(prof.avatar || 'wicked', 256),
+    smallImageKey: clip(smallIcon, 256),
     smallImageText: isPlaying ? 'Playing in Wicked Player' : 'Paused in Wicked Player',
     instance: false,
   };

@@ -4,15 +4,31 @@ Ad-free music player with effects, lyrics, overlays, community profiles and Disc
 
 ## Download / Update
 
-**Latest release (v3.5.8):** https://github.com/Tone730/wicked-player/releases/latest
+**Latest release (v3.5.10):** https://github.com/Tone730/wicked-player/releases/latest
 
-Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.8.exe
+Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.10.exe
 
 Install once and the app auto-updates from GitHub (`latest.yml`). Existing installs from 3.5.0 onward pick up new releases automatically.
 
-## What's in v3.5.8
+## Screenshots
 
-- **Auto-configured Discord presence** — profile-driven details, state, album art, buttons and paused status, with reconnect/retry.
+### Search and player
+
+![Wicked Player search and player](docs/screenshots/02-player.png)
+
+### Now playing
+
+![Wicked Player now playing](docs/screenshots/03-now-playing.png)
+
+### Discord presence settings
+
+![Wicked Player Discord presence settings](docs/screenshots/04-presence.png)
+
+## What's in v3.5.10
+
+- **Track-aware Discord presence** — your Discord activity now always shows the song title and artist that is actually playing, even when you have custom profile presence text.
+- **Album art in presence** — the large presence image is the artwork of the current track; the small icon now uses a valid hosted image asset.
+- **Auto-configured Discord presence** — profile-driven details, state, buttons and paused status, with reconnect/retry.
 - **CustomRP preset export** — generate a `.crp` file for your own profile or a friend's public profile.
 - **Profile Studio** — banners, animated/glowing tags, motion backgrounds, card shapes and premium effects.
 - **Hosted mode** — the desktop app connects straight to `https://wickedplayer.dev`. No local server, cookies, VPN or proxy setup is needed; playback fixes run server-side.
@@ -23,6 +39,7 @@ Install once and the app auto-updates from GitHub (`latest.yml`). Existing insta
 - `electron/` — Electron desktop app, electron-builder config and release publisher.
 - `wicked-frontend/dist/` — built web UI shipped in the installer (`enhance.js?ov=14`, asset bundle `index-2kADS7Vh-p3.js`).
 - `wicked-backend/` — source for the hosted server deployed at `wickedplayer.dev`.
+- `docs/screenshots/` — real screenshots used on this page.
 
 ## Building the desktop app
 
