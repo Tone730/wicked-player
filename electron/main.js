@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -9,6 +9,7 @@ const { globalShortcut } = require('electron');
 let win = null;
 let overlay = null;
 let backendProc = null;
+let tray = null;
 
 /* single instance + wicked:// protocol */
 const gotLock = app.requestSingleInstanceLock();
@@ -19,7 +20,7 @@ app.setAsDefaultProtocolClient('wicked');
 function backendDir() {
   return app.isPackaged
     ? path.join(process.resourcesPath, 'backend')
-    : path.join(__dirname, '..', 'wicked-backend');
+    : path.join(__dirname, '..', 'backend');
 }
 
 function backendUp() {
@@ -62,19 +63,39 @@ function fetchHomeServer() {
           const prefs = JSON.parse(body);
           if (prefs.homeServer && /^https?:\/\//.test(prefs.homeServer)) return resolve(prefs.homeServer);
         } catch {}
-        resolve('http://localhost:5000');
+        resolve('https://wickedplayer.dev');
       });
     });
-    req.on('timeout', () => { req.destroy(); resolve('http://localhost:5000'); });
-    req.on('error', () => resolve('http://localhost:5000'));
+    req.on('timeout', () => { req.destroy(); resolve('https://wickedplayer.dev'); });
+    req.on('error', () => resolve('https://wickedplayer.dev'));
   });
 }
 
 /* ---------- discord rich presence ---------- */
-let rpc = null, rpcReady = false, rpcClientId = null;
+let rpc = null, rpcReady = false, rpcConnecting = false, rpcClientId = null;
+let rpcRetryTimer = null, rpcRetryDelay = 5000;
+let lastRpcTrack = null;
+/* profile-driven presence (pushed by the renderer once logged in) */
+let profilePresence = null;
+let presenceEnabled = true;
+let lastPresenceSignature = '';
+let lastTrackKey = '';
+let presenceStart = Math.floor(Date.now() / 1000);
+function clip(v, max) { return String(v == null ? '' : v).slice(0, max); }
+function clearPresence() {
+  try { if (rpc && rpcReady) rpc.clearActivity(); } catch {}
+  lastPresenceSignature = '';
+}
+function applyPresenceConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
+  profilePresence = cfg;
+  presenceEnabled = cfg.enabled !== false;
+  if (!presenceEnabled) clearPresence();
+  else if (lastRpcTrack) setPresence(lastRpcTrack.track, lastRpcTrack.playing, true);
+}
 
 function dataDir() {
-  const d = app.isPackaged ? path.join(process.resourcesPath, 'backend', 'data') : path.join(backendDir(), 'data');
+  const d = path.join(backendDir(), 'data');
   fs.mkdirSync(d, { recursive: true });
   return d;
 }
@@ -85,36 +106,133 @@ function getDiscordClientId() {
   } catch {}
   return process.env.DISCORD_CLIENT_ID || null;
 }
+function scheduleRpcRetry() {
+  if (rpcRetryTimer) return;
+  rpcRetryTimer = setTimeout(() => {
+    rpcRetryTimer = null;
+    rpc = null; rpcClientId = null; rpcReady = false; rpcConnecting = false;
+    initDiscord();
+  }, rpcRetryDelay);
+  rpcRetryDelay = Math.min(60000, rpcRetryDelay * 2);
+}
 function initDiscord() {
   const clientId = getDiscordClientId();
   if (!clientId) return;
-  if (rpc && rpcClientId === clientId) return;
+  if ((rpc && rpcClientId === clientId) || rpcRetryTimer) return;
   try { if (rpc) { rpc.destroy(); } } catch {}
-  rpc = null; rpcReady = false;
+  rpc = null; rpcReady = false; rpcConnecting = true;
   try {
     const { Client } = require('discord-rpc');
     rpc = new Client({ transport: 'ipc' });
-    rpc.on('ready', () => { rpcReady = true; console.log('[rpc] discord presence ready'); });
-    rpc.login({ clientId }).catch(() => { rpc = null; rpcReady = false; });
+    rpc.on('ready', () => {
+      rpcReady = true; rpcConnecting = false; rpcRetryDelay = 5000;
+      if (rpcRetryTimer) { clearTimeout(rpcRetryTimer); rpcRetryTimer = null; }
+      console.log('[rpc] discord presence ready');
+      /* Discord can start after the app, and a login can finish after the
+         first track change. Re-send whatever was playing last. */
+      if (lastRpcTrack) setPresence(lastRpcTrack.track, lastRpcTrack.playing, true);
+    });
+    rpc.on('disconnected', () => {
+      rpcReady = false; rpcConnecting = false;
+      console.log('[rpc] discord disconnected; will retry');
+      scheduleRpcRetry();
+    });
+    rpc.login({ clientId }).catch((e) => {
+      rpcReady = false; rpcConnecting = false;
+      console.log('[rpc] discord login failed: ' + ((e && e.message) || e));
+      try { if (rpc) { rpc.destroy(); } } catch {}
+      rpc = null;
+      scheduleRpcRetry();
+    });
     rpcClientId = clientId;
-  } catch { rpc = null; rpcReady = false; }
+  } catch (e) {
+    rpc = null; rpcReady = false; rpcConnecting = false;
+    scheduleRpcRetry();
+  }
 }
-function setPresence(track, playing) {
-  if (!rpc || !rpcReady) return;
-  if (!track || !playing) { rpc.clearActivity().catch(() => {}); return; }
+function setPresence(track, playing, force) {
+  lastRpcTrack = { track, playing: !!playing };
+  if (!presenceEnabled) { clearPresence(); return; }
+  if (!rpc || !rpcReady) {
+    if (!rpcRetryTimer && !rpcConnecting) initDiscord();
+    return;
+  }
+  const hasTrack = !!(track && (track.name || track.title));
+  const name = clip(hasTrack ? (track.name || track.title) : 'Nothing selected', 120);
+  const artist = clip((track && track.artist) || '', 120);
+  const album = clip((track && track.album) || '', 120);
+  const isPlaying = !!playing;
+  const prof = profilePresence || {};
+  const pos = Math.max(0, Math.floor((track && track.elapsed) || 0));
+  const key = name + '|' + artist;
+  if (key !== lastTrackKey) {
+    lastTrackKey = key;
+    presenceStart = Math.floor(Date.now() / 1000) - pos;
+  }
   const activity = {
-    details: (track.name || 'Listening').slice(0, 120),
-    state: (track.artist || '').slice(0, 120),
-    startTimestamp: Math.floor(Date.now() / 1000) - Math.max(0, Math.floor(track.elapsed || 0)),
-    largeImageText: (track.album || 'Wicked Player').slice(0, 120),
+    type: 2, // Discord activity type 2 = "Listening to"
+    details: clip(prof.details || ((isPlaying ? '▶ ' : '⏸ ') + name), 120),
+    state: clip(prof.state || ([artist, 'Wicked Player' + (isPlaying ? '' : ' · paused')].filter(Boolean).join(' · ')), 120),
+    startTimestamp: presenceStart,
+    largeImageKey: clip(prof.image || (track && track.art) || 'wicked', 256),
+    largeImageText: clip(((album ? album + ' · ' : '') + name + ' · Wicked Player'), 120),
+    smallImageKey: clip(prof.avatar || 'wicked', 256),
+    smallImageText: isPlaying ? 'Playing in Wicked Player' : 'Paused in Wicked Player',
     instance: false,
   };
-  if (track.art && /^https:/.test(track.art)) {
-    activity.large_image = track.art;      // album art as the big image
-  } else {
-    activity.large_image = 'wicked';
-  }
-  rpc.setActivity(activity).catch(() => {});
+  const buttons = [];
+  const buttonUrl = clip(prof.buttonUrl || prof.profileUrl || '', 300);
+  if (buttonUrl) buttons.push({ label: clip(prof.buttonLabel || 'View profile', 28), url: buttonUrl });
+  if (prof.invite) buttons.push({ label: 'Join Discord', url: clip(prof.invite, 300) });
+  if (buttons.length) activity.buttons = buttons.slice(0, 2);
+  const sig = JSON.stringify(activity);
+  if (!force && sig === lastPresenceSignature) return;
+  lastPresenceSignature = sig;
+  rpc.setActivity(activity).catch(() => {
+    rpcReady = false;
+    scheduleRpcRetry();
+  });
+}
+
+/* ---------- system tray player ---------- */
+let lastTrayTrack = null;
+function trayIconPath() {
+  try {
+    const dest = path.join(app.getPath('userData'), 'wicked-tray.png');
+    if (!fs.existsSync(dest)) fs.copyFileSync(path.join(__dirname, 'icon.png'), dest);
+    return dest;
+  } catch { return path.join(__dirname, 'icon.png'); }
+}
+function createTray() {
+  if (tray) return;
+  try {
+    tray = new Tray(trayIconPath());
+    tray.setToolTip('Wicked Player');
+    const template = [
+      { label: 'Show Wicked Player', click: () => { if (win) { win.show(); win.focus(); } } },
+      { type: 'separator' },
+      { label: 'Play / Pause', click: () => runOverlayCmd({ type: 'toggle' }) },
+      { label: 'Next track', click: () => runOverlayCmd({ type: 'next' }) },
+      { label: 'Previous track', click: () => runOverlayCmd({ type: 'prev' }) },
+      { type: 'separator' },
+      { label: 'Mini player', click: () => { try { ipcMain.emit('winctl', {}, 'mini'); } catch {} } },
+      { label: 'Floating overlay', click: () => toggleOverlay() },
+      { type: 'separator' },
+      { label: 'Quit', click: () => app.quit() },
+    ];
+    try { tray.setContextMenu(Menu.buildFromTemplate(template)); } catch {}
+    tray.on('click', () => { if (win) { if (win.isVisible()) win.focus(); else { win.show(); win.focus(); } } });
+  } catch (e) { console.error('[tray] init failed', e && e.message); tray = null; }
+}
+function updateTray(track, playing) {
+  if (!tray) return;
+  try {
+    lastTrayTrack = track || null;
+    const name = track && (track.name || track.title) ? (track.name || track.title) : '';
+    const artist = track && track.artist ? track.artist : '';
+    try { if (process.platform === 'darwin') tray.setTitle(name && playing ? ('\u25B6 ' + name).slice(0, 32) : ''); } catch {}
+    tray.setToolTip(name ? (name + (artist ? ' \u2014 ' + artist : '') + (playing ? ' \u25B6' : '')) : 'Wicked Player');
+  } catch {}
 }
 
 /* ---------- UI location (kept for packaged fallback) ---------- */
@@ -244,7 +362,20 @@ function toggleOverlay() {
 }
 
 /* ---------- IPC ---------- */
-ipcMain.on('presence', (_e, { track, playing }) => setPresence(track, playing));
+ipcMain.on('presence', (_e, { track, playing }) => { setPresence(track, playing); updateTray(track, playing); });
+ipcMain.on('presence:config', (_e, cfg) => applyPresenceConfig(cfg));
+ipcMain.on('presence:enabled', (_e, enabled) => {
+  presenceEnabled = !!enabled;
+  if (!presenceEnabled) clearPresence();
+  else if (lastRpcTrack) setPresence(lastRpcTrack.track, lastRpcTrack.playing, true);
+});
+ipcMain.handle('presence:status', () => ({
+  ready: !!rpcReady,
+  enabled: presenceEnabled,
+  clientId: rpcClientId || getDiscordClientId(),
+  configured: !!profilePresence,
+  displayName: profilePresence ? profilePresence.displayName || '' : '',
+}));
 
 /* ---------- overlay plumbing: main process drives everything ----------
    State is polled straight from the main window's audio element via
@@ -266,18 +397,15 @@ function readPlayerState() {
         if (img) art = img.src;
         else {
           const el = document.querySelector('[class*="track-art"] [style*="background"]');
-          if (el) { const m = /url\\(["']?([^"')]+)/.exec(el.style.backgroundImage || ''); if (m) art = m[1]; }
+          if (el) { const m = /url\(["']?([^"')]+)/.exec(el.style.backgroundImage || ''); if (m) art = m[1]; }
         }
         return JSON.stringify({
-          ok: true,
           playing: a ? !a.paused : false,
           title: lines[0] || '',
           artist: lines[1] || '',
           art: art,
           pos: a ? a.currentTime : 0,
-          dur: a ? (a.duration || 0) : 0,
-          hasTrack: !!(lines[0] || a),
-          videoId: a ? (a.dataset.videoId || '') : ''
+          dur: a ? (a.duration || 0) : 0
         });
       })()`,
       false
@@ -287,14 +415,15 @@ function readPlayerState() {
 }
 
 async function pushOverlayState() {
-  if (!overlay || !overlay.isVisible() || !win) return;
+  if (!win) return;
   const st = await readPlayerState();
   if (!st) return;
-  try { overlay.webContents.send('overlay:state', st); } catch {}
-  // discord presence rides the same poll (2s refresh)
+  if (overlay && overlay.isVisible()) { try { overlay.webContents.send('overlay:state', st); } catch {} }
+  // discord presence + tray tooltip ride the same poll (2s refresh)
   if (st.title && Date.now() - lastPresenceAt > 2000) {
     lastPresenceAt = Date.now();
     setPresence({ name: st.title, artist: st.artist, album: '', art: st.art, elapsed: st.pos }, st.playing);
+    updateTray({ name: st.title, artist: st.artist }, st.playing);
   }
 }
 
@@ -315,7 +444,7 @@ function runOverlayCmd(cmd) {
       `(() => { const a = document.querySelector('audio');
         if (a) { a.paused ? a.play().catch(()=>{}) : a.pause(); }
         else { const bs=[...document.querySelectorAll('button')];
-               const pl=bs.find(b=>/^\\s*(play|pause)\\s*$/i.test(b.getAttribute('aria-label')||b.title||b.textContent||''));
+               const pl=bs.find(b=>/^\s*(play|pause)\s*$/i.test(b.getAttribute('aria-label')||b.title||b.textContent||''));
                if(pl) pl.click(); } })()`
     );
   } else if (c === 'play') {
@@ -329,23 +458,6 @@ function runOverlayCmd(cmd) {
   } else if (c === 'seek') {
     const v = Number(cmd.value || 0);
     execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.currentTime=${v}; })()`);
-  } else if (c === 'video') {
-    /* overlay video mode: grow the window, restore on exit */
-    if (overlay && !overlay.isDestroyed()) {
-      try {
-        if (cmd.on) {
-          const b = overlay.getBounds();
-          if (!overlay.__vidRestore) overlay.__vidRestore = { x: b.x, y: b.y, width: b.width, height: b.height };
-          overlay.setMinimumSize(400, 300);
-          overlay.setBounds({ x: b.x, y: Math.max(0, b.y - 160), width: 500, height: 356 });
-        } else {
-          overlay.setMinimumSize(280, 64);
-          const r = overlay.__vidRestore;
-          if (r) overlay.setBounds(r);
-          overlay.__vidRestore = null;
-        }
-      } catch {}
-    }
   } else if (c === 'close-overlay') {
     toggleOverlay();
   }
@@ -393,6 +505,8 @@ ipcMain.handle('updates:install', () => {
 /* ---------- lifecycle ---------- */
 app.whenReady().then(() => {
   createWindow();
+  createTray();
+  startStateTimer();
   setupUpdater();
   registerHotkeys();
 });
@@ -427,11 +541,19 @@ function registerHotkeys() {
     'CommandOrControl+Alt+Left': 'prev',
     'CommandOrControl+Alt+Space': 'toggle',
     'CommandOrControl+Alt+O': 'overlay',
+    // native OS media keys — routed to the renderer's onHotkey handler
+    'MediaPlayPause': 'toggle',
+    'MediaTrackNext': 'next',
+    'MediaTrackPrevious': 'prev',
+    'MediaStop': 'pause',
   };
   for (const [accel, action] of Object.entries(map)) {
-    globalShortcut.register(accel, () => {
-      if (action === 'overlay') { toggleOverlay(); return; }
-      try { win?.webContents.send('hotkey', action); } catch {}
-    });
+    try {
+      globalShortcut.register(accel, () => {
+        if (action === 'overlay') { toggleOverlay(); return; }
+        if (action === 'pause') { runOverlayCmd({ type: 'pause' }); return; }
+        try { win?.webContents.send('hotkey', action); } catch {}
+      });
+    } catch { /* some accelerators are unavailable on some platforms */ }
   }
 }

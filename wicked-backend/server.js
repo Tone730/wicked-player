@@ -6,11 +6,49 @@ const cors = require('cors');
 const compression = require('compression');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const https = require('https');
+const dns = require('dns');
+const net = require('net');
+const { spawn } = require('child_process');
+
+/* Block SSRF: never dial private/loopback/link-local addresses from proxies. */
+function blockedIP(ip) {
+  if (net.isIP(ip) === 4) {
+    const a = ip.split('.').map(Number);
+    return a[0] === 0 || a[0] === 10 || a[0] === 127 ||
+      (a[0] === 169 && a[1] === 254) ||
+      (a[0] === 172 && a[1] >= 16 && a[1] <= 31) ||
+      (a[0] === 192 && a[1] === 168) ||
+      (a[0] === 100 && a[1] >= 64 && a[1] <= 127) ||
+      (a[0] === 198 && (a[1] === 18 || a[1] === 19));
+  }
+  const s = String(ip).toLowerCase();
+  return s === '::' || s === '::1' || s.startsWith('fc') || s.startsWith('fd') ||
+    s.startsWith('fe80') || /^::ffff:(0|10|127|192\.168|169\.254)\./.test(s);
+}
+const safeLookup = (host, opts, cb) => dns.lookup(host, opts, (err, address, family) => {
+  if (err) return cb(err);
+  if (blockedIP(address)) return cb(new Error('blocked address'));
+  cb(null, address, family);
+});
+const safeHttpsAgent = new https.Agent({ lookup: safeLookup, family: 4 });
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors());
+/* baseline security headers, request ids, and rate limits */
+const { applyHardening } = require('./lib/hardening');
+const { readJSON, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
+const accessLog = require('./lib/access-log');
+applyHardening(app);
+app.use(accessLog.middleware);
+
+const ALLOWED_ORIGINS = (process.env.SOCKET_ORIGINS ||
+  'https://wickedplayer.dev,https://www.wickedplayer.dev,http://localhost:5000')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+const corsOpts = { origin: ALLOWED_ORIGINS, credentials: true };
+app.use(cors(corsOpts));
 app.use(compression());
 app.use(express.json({ limit: '30mb' }));
 
@@ -26,79 +64,149 @@ app.use(auth.gate);          // blocks protected APIs for logged-out / banned us
 ============================================================ */
 const community = require('./community');
 const { Server } = require('socket.io');
-const io = new Server(server, { cors: { origin: '*' }, maxHttpBufferSize: 40e6 });
+const io = new Server(server, { cors: corsOpts, maxHttpBufferSize: 1e6 });
 app.use(community.router);
 community.attach(io);
 
-/* media files (uploaded mp3/mp4/gif images) */
+/* Operational alerting: persisted to data/alerts.json, emitted to admin
+   clients, and optionally POSTed to ALERT_WEBHOOK_URL. Never breaks playback. */
+const alerts = require('./alerts');
+alerts.attachSocket(io);
+/* Live usage events are pushed only to signed-in admins. */
+auth.setUsageEmitter((row) => {
+  try {
+    const room = io.sockets.adapter.rooms.get('admins');
+    if (room && room.size) io.to('admins').emit('usage:heartbeat', row);
+  } catch {}
+});
+
+/* media files (uploaded images/audio/video) */
 const MEDIA_DIR = path.join(__dirname, 'media');
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
-app.use('/media', express.static(MEDIA_DIR));
+app.use('/media', express.static(MEDIA_DIR, {
+  setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+}));
 
-/* Upload a file (image/gif/mp3/mp4) as base64 data URL */
-const MIME_EXT = {
-  'image/gif': 'gif', 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
-  'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/mp4': 'm4a',
-  'audio/wav': 'wav', 'audio/webm': 'webm', 'video/mp4': 'mp4', 'video/webm': 'webm',
-};
+/* Upload a file as base64 data URL. The extension is derived from the
+   actual bytes, never from the claimed name/MIME. */
+const MAX_UPLOAD = { image: 10e6, audio: 25e6, video: 25e6 };
+function sniffType(b, claimed) {
+  const s = (n, o = 0) => b.slice(o, o + n).toString('latin1');
+  if (s(3) === 'GIF8') return { mime: 'image/gif', ext: 'gif', kind: 'image' };
+  if (b.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])))
+    return { mime: 'image/png', ext: 'png', kind: 'image' };
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff)
+    return { mime: 'image/jpeg', ext: 'jpg', kind: 'image' };
+  if (s(4) === 'RIFF' && s(4, 8) === 'WEBP')
+    return { mime: 'image/webp', ext: 'webp', kind: 'image' };
+  if (s(4) === 'RIFF' && s(4, 8) === 'WAVE')
+    return { mime: 'audio/wav', ext: 'wav', kind: 'audio' };
+  if (s(3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0))
+    return { mime: 'audio/mpeg', ext: 'mp3', kind: 'audio' };
+  if (s(4) === 'ftyp') {
+    return /^audio\//i.test(String(claimed || ''))
+      ? { mime: 'audio/mp4', ext: 'm4a', kind: 'audio' }
+      : { mime: 'video/mp4', ext: 'mp4', kind: 'video' };
+  }
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3)
+    return { mime: 'video/webm', ext: 'webm', kind: 'video' };
+  return null;
+}
 app.post('/upload', (req, res) => {
-  const { name, data } = req.body;
-  const m = String(data || '').match(/^data:([^;]+);base64,(.+)$/);
+  const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(String(req.body?.data || ''));
   if (!m) return res.status(400).json({ error: 'missing data' });
-  const ext = MIME_EXT[m[1]] || 'bin';
-  const file = `${Date.now()}-${String(name || 'file').replace(/[^a-z0-9._-]/gi, '_').slice(0, 40)}${ext === path.extname(String(name || '')) ? '' : path.extname(String(name || ''))}`.replace(/\.bin$/, '.' + ext);
-  fs.writeFile(path.join(MEDIA_DIR, file), Buffer.from(m[2], 'base64'), (err) => {
+  const buf = Buffer.from(m[2], 'base64');
+  if (!buf.length) return res.status(400).json({ error: 'empty file' });
+  if (buf.length > 25e6) return res.status(413).json({ error: 'file too large' });
+  const type = sniffType(buf, m[1]);
+  if (!type) return res.status(400).json({ error: 'unsupported file type' });
+  if (buf.length > MAX_UPLOAD[type.kind]) return res.status(413).json({ error: 'file too large' });
+
+  const file = crypto.randomBytes(16).toString('hex') + '.' + type.ext;
+  fs.writeFile(path.join(MEDIA_DIR, file), buf, { flag: 'wx' }, (err) => {
     if (err) return res.status(500).json({ error: 'save failed' });
-    const kind = (m[1] || '').includes('audio') ? 'audio' : 'video';
-    const track = kind === 'audio'
-      ? { id: 'file-' + file, name: (name || file).replace(/\.[^.]+$/, ''), artist: 'Local file', album: 'Your files', art: null, duration_ms: 0, stream_url: `/media/${file}`, local: true }
-      : { id: 'file-' + file, name: (name || file), artist: 'Local file', album: 'Your files', art: null, duration_ms: 0, stream_url: `/media/${file}`, local: true, video: kind !== 'audio' };
-    const what = kind === 'audio' ? 'track' : 'video';
-    track.kind = what;
+    const label = String(req.body?.name || file).replace(/[\u0000-\u001f]/g, '').slice(0, 80);
+    const track = {
+      id: 'file-' + file,
+      name: type.kind === 'image' ? label : label.replace(/\.[^.]+$/, ''),
+      artist: 'Local file', album: 'Your files', art: null, duration_ms: 0,
+      stream_url: `/media/${file}`, local: true,
+      kind: type.kind === 'audio' ? 'track' : 'video',
+    };
+    if (type.kind !== 'audio') track.video = true;
     res.json({ file, url: `/media/${file}`, track });
   });
 });
 
 /* ============================================================
-   PLAYLISTS (persisted in library.json)
+   PLAYLISTS (persisted in playlists.json, atomically)
 ============================================================ */
 const PLAYLISTS_FILE = path.join(__dirname, 'data', 'playlists.json');
+const sessionUser = (req) => auth.userFromReq(req)?.username || null;
+
+function loadPlaylists() {
+  const list = readJSON(PLAYLISTS_FILE, []);
+  return Array.isArray(list) ? list : [];
+}
+function savePlaylists(list) {
+  try { atomicWriteJSON(PLAYLISTS_FILE, list); return true; }
+  catch (e) {
+    process.stderr.write(`[playlists] save failed: ${e && e.message || e}\n`);
+    return false;
+  }
+}
+/* One-time migration: legacy playlists had no `user` field and were therefore
+   invisible to everyone. Attach them to the admin account and keep a copy of
+   the original file before rewriting. */
+(function migratePlaylists() {
+  try {
+    const list = loadPlaylists();
+    if (!list.some((pl) => !pl.user)) return;
+    const backup = PLAYLISTS_FILE + '.pre-user-migration';
+    if (!fs.existsSync(backup)) fs.copyFileSync(PLAYLISTS_FILE, backup);
+    for (const pl of list) if (!pl.user) pl.user = 'admin';
+    atomicWriteJSON(PLAYLISTS_FILE, list);
+    process.stderr.write('[playlists] migrated legacy entries to admin\n');
+  } catch (e) {
+    process.stderr.write(`[playlists] migration skipped: ${e && e.message || e}\n`);
+  }
+})();
 
 app.get('/library/playlists', (req, res) => {
-  const user = String(req.query.user || '');
-  try {
-    let list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8'));
-    if (user) list = list.filter((pl) => !pl.user || pl.user === user);
-    res.json(list);
-  } catch { res.json([]); }
+  const user = sessionUser(req);
+  const list = loadPlaylists();
+  res.json(list.filter((pl) => pl.user === user));
 });
 
 app.post('/library/playlists', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   let list = [];
-  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
-  const { name, tracks, user, public: isPublic } = req.body;
-  if (!name?.trim()) return res.status(400).json({ error: 'missing name' });
-  let pl = list.find((p) => p.name === name && (!user || !p.user || p.user === user));
+  list = loadPlaylists();
+  const { name, tracks, public: isPublic } = req.body;
+  if (!String(name || '').trim()) return res.status(400).json({ error: 'missing name' });
+  let pl = list.find((p) => p.name === name && p.user === user);
   if (!pl) {
-    pl = { name, user: user || undefined, tracks: [], created: Date.now() };
+    pl = { name, user, tracks: [], created: Date.now() };
     list.push(pl);
   }
   if (isPublic !== undefined) pl.public = !!isPublic;
-  if (tracks?.length) {
-    for (const t of tracks) if (!pl.tracks.find((x) => x.id === t.id)) pl.tracks.push(t);
+  if (Array.isArray(tracks)) {
+    for (const t of tracks) if (t?.id && !pl.tracks.find((x) => x.id === t.id)) pl.tracks.push(t);
   }
   fs.mkdirSync(path.dirname(PLAYLISTS_FILE), { recursive: true });
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
-  res.json(list);
+  if (!savePlaylists(list)) return res.status(500).json({ error: 'Could not save playlist. Please try again.' });
+  res.json(list.filter((p) => p.user === user));
 });
 
 app.delete('/library/playlists/:name', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   let list = [];
-  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
-  const user = String(req.query.user || '');
-  list = list.filter((p) => !(p.name === req.params.name && (!user || !p.user || p.user === user)));
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
-  res.json(list);
+  list = loadPlaylists();
+  list = list.filter((p) => !(p.name === req.params.name && p.user === user));
+  if (!savePlaylists(list)) return res.status(500).json({ error: 'Could not save playlist. Please try again.' });
+  res.json(list.filter((p) => p.user === user));
 });
 
 
@@ -106,18 +214,20 @@ app.delete('/library/playlists/:name', (req, res) => {
    PLAYLIST VISIBILITY (public/private) + discovery feed
 ============================================================ */
 app.post('/library/playlists/visibility', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   let list = [];
-  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
-  const { user, name, isPublic } = req.body;
+  list = loadPlaylists();
+  const { name, isPublic } = req.body;
   const pl = list.find((p) => p.name === name && p.user === user);
   if (!pl) return res.status(404).json({ error: 'playlist not found' });
   pl.public = !!isPublic;
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
+  if (!savePlaylists(list)) return res.status(500).json({ error: 'Could not save playlist. Please try again.' });
   res.json({ ok: true, name: pl.name, public: !!pl.public });
 });
 app.get('/library/playlists/public', (req, res) => {
   try {
-    const list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8'));
+    const list = loadPlaylists();
     res.json(list.filter((p) => p.public && p.user).map((p) => ({
       name: p.name, user: p.user, total: (p.tracks || []).length, tracks: p.tracks || [], created: p.created,
     })).sort((a, b) => b.created - a.created).slice(0, 50));
@@ -136,7 +246,7 @@ app.post('/library/artist-like', (req, res) => {
   const arr = lib.artistLikes[user] = lib.artistLikes[user] || [];
   const i = arr.findIndex((a) => a.toLowerCase() === String(artist).toLowerCase());
   if (i >= 0) arr.splice(i, 1); else arr.push(String(artist).slice(0, 80));
-  fs.writeFileSync(LIB_FILE, JSON.stringify(lib, null, 2));
+  tryWriteJSON(LIB_FILE, lib);
   res.json({ likes: arr, liked: i < 0 });
 });
 app.get('/library/artists', (req, res) => {
@@ -155,7 +265,7 @@ app.get('/import/youtube', async (req, res) => {
     return res.status(400).json({ error: 'Paste a YouTube video link' });
   }
   try {
-    const info = await ytdlp(url, { dumpSingleJson: true, noWarnings: true });
+    const info = await ytdlp(url, { dumpSingleJson: true, noWarnings: true, ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}) });
     const audioFormats = (info.formats || []).filter(
       (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
     );
@@ -195,8 +305,11 @@ function loadLib() {
   }
 }
 function saveLib(lib) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(LIB_FILE, JSON.stringify(lib, null, 2));
+  try { atomicWriteJSON(LIB_FILE, lib); return true; }
+  catch (e) {
+    process.stderr.write(`[library] save failed: ${e && e.message || e}\n`);
+    return false;
+  }
 }
 
 app.get('/library', (req, res) => res.json(loadLib()));
@@ -226,7 +339,7 @@ app.post('/library/history', (req, res) => {
 /* ============================================================
    LISTENING STATS (Wrapped): minutes + top songs/artists per user
 ============================================================ */
-const STATS_FILE = './data/listen-stats.json';
+const STATS_FILE = path.join(DATA_DIR, 'listen-stats.json');
 function readStats() { try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch { return {}; } }
 app.post('/api/stats/listen', (req, res) => {
   const user = String(req.body.user || 'guest').slice(0, 40);
@@ -236,7 +349,7 @@ app.post('/api/stats/listen', (req, res) => {
   const month = new Date().toISOString().slice(0, 7);
   u.total += secs;
   u.months[month] = (u.months[month] || 0) + secs;
-  fs.writeFileSync(STATS_FILE, JSON.stringify(st, null, 2));
+  tryWriteJSON(STATS_FILE, st);
   res.json({ ok: true });
 });
 app.get('/api/stats', (req, res) => {
@@ -272,6 +385,11 @@ app.get('/api/stats', (req, res) => {
 app.get('/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Missing ?q= search term' });
+
+  /* Start resolving the literal query in the background immediately, in parallel
+     with the catalog APIs. By the time the user sees results and clicks, the
+     slow YouTube lookup is usually already cached or in flight. */
+  warmStream(query);
 
   const one = (p) => p.then((v) => v).catch(() => []);
 
@@ -350,6 +468,29 @@ app.get('/search', async (req, res) => {
     merged.push(t);
   }
   if (!merged.length) return res.status(500).json({ error: 'Search failed' });
+  // relevance sort: exact title match first, then starts-with, then contains
+  var qLower = query.toLowerCase();
+  merged.sort(function (a, b) {
+    var aN = (a.name || '').toLowerCase();
+    var bN = (b.name || '').toLowerCase();
+    var aS = 0, bS = 0;
+    if (aN === qLower) aS -= 100;
+    if (bN === qLower) bS -= 100;
+    if (aN.indexOf(qLower) === 0) aS -= 50;
+    if (bN.indexOf(qLower) === 0) bS -= 50;
+    if (aN.indexOf(qLower) !== -1) aS -= 10;
+    if (bN.indexOf(qLower) !== -1) bS -= 10;
+    return aS - bS;
+  });
+
+  /* Warm the top few real result queries (the ones users are most likely to
+     click) without delaying the search response. The queue is serialized so
+     we never spawn several expensive yt-dlp processes at once. */
+  for (const t of merged.slice(0, 3)) {
+    try {
+      warmStream(new URL(t.stream_url, 'http://localhost').searchParams.get('q'));
+    } catch {}
+  }
   res.json(merged);
 });
 
@@ -418,11 +559,17 @@ app.get('/radio', async (req, res) => {
 });
 
 /* --- admin key + codes helper (used by rewards) --- */
-const ADMIN_KEY = process.env.ADMIN_KEY || '72e9a3f1-5c08-4b6c-8e6b-7f2f60e0eda3';
-const adminAuth = (req, res, next) => { if (req.get('X-ADMIN-KEY') !== ADMIN_KEY) return res.status(401).json({ msg: 'no' }); next(); };
+if (!process.env.ADMIN_KEY) throw new Error('ADMIN_KEY must be set in .env');
+const ADMIN_KEY = process.env.ADMIN_KEY;
+const adminAuth = (req, res, next) => {
+  const a = Buffer.from(String(req.get('X-ADMIN-KEY') || ''));
+  const b = Buffer.from(ADMIN_KEY);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ msg: 'no' });
+  next();
+};
 const codesFile = './data/codes.json';
 function jsonRead(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } }
-function jsonWrite(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
+function jsonWrite(file, data) { tryWriteJSON(file, data); }
 /* ============================================================
    REWARDS: random drops for listening time - claim via Discord
 ============================================================ */
@@ -457,7 +604,8 @@ function rewardCode() {
   return 'WK-' + Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 }
 app.post('/api/reward/issue', async (req, res) => {
-  const user = String(req.body.user || 'guest').slice(0, 40);
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   const now = Date.now();
   const d = await readRewards();
   const mine = d.issued.filter((r) => r.user === user);
@@ -496,32 +644,37 @@ app.get('/api/config/discord-invite', (_req, res) => {
 });
 
 app.post('/library/playlists/add-track', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   const { name, track } = req.body;
   if (!name || !track || !track.id) return res.status(400).json({ error: 'Missing playlist name or track' });
   let list = [];
-  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
-  const pl = list.find(function (p) { return p.name === name; });
+  list = loadPlaylists();
+  const pl = list.find((p) => p.name === name && p.user === user);
   if (!pl) return res.status(404).json({ error: 'Playlist not found' });
   pl.tracks = pl.tracks || [];
-  if (pl.tracks.find(function (t) { return t.id === track.id; })) return res.json({ ok: true, added: false, reason: 'already in playlist' });
+  if (pl.tracks.find((t) => t.id === track.id)) return res.json({ ok: true, added: false, reason: 'already in playlist' });
   pl.tracks.push({ id: track.id, name: track.name, artist: track.artist, album: track.album, art: track.art, duration_ms: track.duration_ms || 0, stream_url: track.stream_url, addedAt: Date.now() });
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
+  if (!savePlaylists(list)) return res.status(500).json({ error: 'Could not save playlist. Please try again.' });
   res.json({ ok: true, added: true, playlist: name, trackCount: pl.tracks.length });
 });
 
 app.post('/library/playlists/remove-track', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   const { name, trackId } = req.body;
   let list = [];
-  try { list = JSON.parse(fs.readFileSync(PLAYLISTS_FILE, 'utf8')); } catch {}
-  const pl = list.find(function (p) { return p.name === name; });
+  list = loadPlaylists();
+  const pl = list.find((p) => p.name === name && p.user === user);
   if (!pl) return res.status(404).json({ error: 'Playlist not found' });
-  pl.tracks = (pl.tracks || []).filter(function (t) { return t.id !== trackId; });
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2));
+  pl.tracks = (pl.tracks || []).filter((t) => t.id !== trackId);
+  if (!savePlaylists(list)) return res.status(500).json({ error: 'Could not save playlist. Please try again.' });
   res.json({ ok: true, trackCount: pl.tracks.length });
 });
 
 app.get('/api/rewards', async (req, res) => {
-  const user = String(req.query.user || '').slice(0, 40);
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Login required' });
   const d = await readRewards();
   res.json(d.issued.filter((r) => r.user === user).sort((a, b) => b.at - a.at).slice(0, 30));
 });
@@ -584,7 +737,7 @@ function logError(kind, message) {
     try { log = JSON.parse(fs.readFileSync(ERR_FILE, 'utf8')); } catch {}
     log.push({ at: Date.now(), kind, message: String(message).slice(0, 300) });
     if (log.length > 200) log = log.slice(-200);
-    fs.writeFileSync(ERR_FILE, JSON.stringify(log, null, 2));
+    tryWriteJSON(ERR_FILE, log);
   } catch {}
 }
 const origConsoleError = console.error.bind(console);
@@ -678,6 +831,249 @@ app.get('/lyrics', async (req, res) => {
 ============================================================ */
 const ytdlp = require('youtube-dl-exec');
 
+/* ---------- stream resolution cache (instant replay + search warm-up) ----------
+   yt-dlp takes ~10s per lookup. Cache the resolved audio URL in memory and on
+   disk, dedupe concurrent lookups, and warm the top search results serially so
+   the first click usually hits cache. Googlevideo URLs carry an `expire` param;
+   cached entries are retired 2 minutes before upstream expiry. */
+const STREAM_CACHE_FILE = path.join(__dirname, 'data', 'stream-cache.json');
+const STREAM_CACHE_TTL = Math.max(30, Math.min(720, Number(process.env.STREAM_CACHE_TTL_MIN) || 120)) * 60 * 1000;
+const STREAM_CACHE_MAX = Math.max(50, Math.min(10000, Number(process.env.STREAM_CACHE_MAX) || 2000));
+const STREAM_WARM_MAX = Math.max(4, Math.min(200, Number(process.env.STREAM_WARM_MAX) || 40));
+const streamCache = new Map();
+const streamPending = new Map();
+const streamStats = { hits: 0, misses: 0, dedupes: 0, warmed: 0, fallbacks: 0, evictions: 0 };
+const streamFallback = require('./stream-fallback');
+try {
+  const saved = JSON.parse(fs.readFileSync(STREAM_CACHE_FILE, 'utf8'));
+  for (const [k, v] of Object.entries(saved)) {
+    if (v && v.expiresAt > Date.now()) streamCache.set(k, v);
+  }
+} catch {}
+let streamCacheDirty = false;
+function pruneStreamCache(force) {
+  const now = Date.now();
+  let changed = false;
+  for (const [k, v] of streamCache) {
+    if (!v || !(v.expiresAt > now) || (v.data && audioUrlExpiry(v.data.audio_url) <= now)) {
+      streamCache.delete(k);
+      changed = true;
+    }
+  }
+  if (changed) streamCacheDirty = true;
+  if (force && changed) persistStreamCache();
+  return changed;
+}
+function persistStreamCache() {
+  if (!streamCacheDirty) return;
+  streamCacheDirty = false;
+  pruneStreamCache(false);
+  try {
+    const obj = {};
+    for (const [k, v] of streamCache) if (v.expiresAt > Date.now()) obj[k] = v;
+    fs.writeFileSync(STREAM_CACHE_FILE, JSON.stringify(obj));
+  } catch {}
+}
+setInterval(() => persistStreamCache(), 30000).unref();
+setInterval(() => pruneStreamCache(true), 60000).unref();
+const streamKey = (q) => String(q || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function audioUrlExpiry(url) {
+  try {
+    const sec = Number(new URL(url).searchParams.get('expire'));
+    return sec > 0 ? sec * 1000 : Infinity;
+  } catch { return Infinity; }
+}
+function streamExpiry(data) {
+  let exp = Date.now() + STREAM_CACHE_TTL;
+  const urlExp = audioUrlExpiry(data.audio_url);
+  if (Number.isFinite(urlExp)) exp = Math.min(exp, urlExp - 120000);
+  return exp;
+}
+const RETRYABLE_STREAM_ERROR = /sign in to confirm|bot|403|429|temporarily unavailable|requested format is not available|unable to extract|timeout|timed out|connection reset|http error 5\d\d/i;
+async function resolveFreshStream(query) {
+  const attempts = [
+    { q: 'ytsearch1:' + query + ' audio' },
+    { q: 'ytsearch1:' + query },
+    { q: 'ytsearch3:' + query + ' audio' },
+  ];
+  let lastErr = null;
+  let botBlocked = false;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const searchResults = await ytdlp(attempts[i].q, {
+        dumpSingleJson: true,
+        noWarnings: true, ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}),
+      });
+      const videos = (searchResults && searchResults.entries) || (searchResults && searchResults.id ? [searchResults] : []);
+      for (const video of videos) {
+        const audioFormats = (video.formats || []).filter(
+          (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none') && f.url
+        );
+        audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0));
+        const best = audioFormats[0];
+        if (!best) continue;
+        return {
+          title: video.title,
+          duration: video.duration,
+          audio_url: best.url,
+          proxied_url: `/audio?u=${encodeURIComponent(best.url)}`,
+          bitrate: best.abr,
+          ext: best.ext,
+          video_id: video.id,
+          ...(i ? { retry: i } : {}),
+        };
+      }
+      lastErr = new Error(videos.length ? 'No audio stream found' : 'No YouTube result found');
+      if (i === attempts.length - 1) break; // fall through to fallback sources
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e && e.message || e);
+      if (/sign in to confirm|bot/i.test(msg)) { botBlocked = true; break; }
+      if (!RETRYABLE_STREAM_ERROR.test(msg)) break;
+      if (i === attempts.length - 1) break;
+    }
+    await new Promise((r) => setTimeout(r, 250 * (i + 1)));
+  }
+  const reason = String(lastErr && lastErr.message || lastErr || 'resolve failed').slice(0, 160);
+  console.error('Stream resolve failed after retries: ' + reason);
+
+  // Auto-healing: privacy frontends, then short previews, then peer rotation
+  // (triggered from noteBotFailure). A fallback result is cached like a normal hit.
+  try {
+    const fb = await streamFallback.resolve(query, reason);
+    if (fb && fb.audio_url) {
+      streamStats.fallbacks++;
+      return { ...fb, cache: 'fallback', fallbackReason: reason };
+    }
+  } catch (e) {
+    console.error('Stream fallback failed: ' + (e && e.message || e));
+  }
+  alerts.record('stream-failure', 'critical', 'All stream sources failed for a track', { query, reason });
+  return {
+    error: botBlocked
+      ? 'Stream unavailable — YouTube is blocking this track right now'
+      : 'Stream unavailable right now',
+    status: 502,
+  };
+}
+function getStream(query) {
+  const key = streamKey(query);
+  pruneStreamCache(false);
+  const hit = streamCache.get(key);
+  if (hit && hit.expiresAt > Date.now() && audioUrlExpiry(hit.data.audio_url) > Date.now()) {
+    streamStats.hits++;
+    return Promise.resolve({ ...hit.data, cache: 'hit' });
+  }
+  if (hit) { streamCache.delete(key); streamCacheDirty = true; }
+  if (streamPending.has(key)) {
+    streamStats.dedupes++;
+    return streamPending.get(key);
+  }
+  const p = resolveFreshStream(query).then((data) => {
+    if (data.error) return data;
+    streamStats.misses++;
+    const rec = { data, expiresAt: streamExpiry(data) };
+    if (rec.expiresAt <= Date.now()) return { ...data, cache: 'miss' };
+    streamCache.set(key, rec);
+    streamCacheDirty = true;
+    if (streamCache.size > STREAM_CACHE_MAX) {
+      let oldest = null;
+      for (const [k, v] of streamCache) {
+        if (!oldest || v.expiresAt < oldest[1].expiresAt) oldest = [k, v];
+      }
+      if (oldest) { streamCache.delete(oldest[0]); streamStats.evictions++; }
+    }
+    return { ...data, cache: 'miss' };
+  }).finally(() => streamPending.delete(key));
+  streamPending.set(key, p);
+  return p;
+}
+const warmQueue = [];
+let warming = false;
+function warmStream(q) {
+  const key = streamKey(q);
+  const hit = streamCache.get(key);
+  if (!key || (hit && hit.expiresAt > Date.now() && audioUrlExpiry(hit.data.audio_url) > Date.now()) || streamPending.has(key) || warmQueue.includes(key)) return;
+  warmQueue.push(key);
+  if (warmQueue.length > STREAM_WARM_MAX) warmQueue.shift();
+  if (!warming) { warming = true; setImmediate(drainWarmQueue); }
+}
+async function drainWarmQueue() {
+  while (warmQueue.length) {
+    const q = warmQueue.shift();
+    try {
+      const r = await getStream(q);
+      if (!r || !r.error) streamStats.warmed++;
+    } catch {}
+  }
+  warming = false;
+}
+
+/* Small observability endpoint for the stream resolver cache. */
+app.get('/api/stream-cache/stats', (req, res) => {
+  let oldest = null;
+  for (const [k, v] of streamCache) {
+    if (!oldest || v.expiresAt < oldest.expiresAt) oldest = { key: k, expiresAt: v.expiresAt };
+  }
+  res.json({
+    entries: streamCache.size,
+    pending: streamPending.size,
+    queued: warmQueue.length,
+    max: STREAM_CACHE_MAX,
+    hits: streamStats.hits,
+    misses: streamStats.misses,
+    dedupes: streamStats.dedupes,
+    warmed: streamStats.warmed,
+    fallbacks: streamStats.fallbacks,
+    evictions: streamStats.evictions,
+    oldestExpiresAt: oldest && oldest.expiresAt,
+    fallbackConfig: streamFallback.stats(),
+  });
+});
+
+/* Ask the server to background-warm a specific query (used for next-in-queue
+   prefetch from the client). Cheap and idempotent. */
+app.post('/api/stream-cache/warm', (req, res) => {
+  const q = String((req.body && req.body.q) || req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'Missing q' });
+  warmStream(q.slice(0, 200));
+  res.json({ ok: true, queued: warmQueue.length });
+});
+
+/* Admin-only operational alert feed (session-based, matches /admin/api/*). */
+app.get('/admin/api/alerts', (req, res) => {
+  try {
+    const u = auth.userFromReq(req);
+    if (!u || !u.account || u.account.role !== 'admin') return res.status(403).json({ msg: 'no' });
+    res.json(alerts.list(req.query.limit));
+  } catch { res.status(500).json({ msg: 'error' }); }
+});
+app.post('/admin/api/alerts/clear', (req, res) => {
+  try {
+    const u = auth.userFromReq(req);
+    if (!u || !u.account || u.account.role !== 'admin') return res.status(403).json({ msg: 'no' });
+    res.json(alerts.clear());
+  } catch { res.status(500).json({ msg: 'error' }); }
+});
+
+/* Pre-warm the most recently played tracks shortly after boot so the first
+   click of a familiar song is instant. Uses the existing serialized warm queue. */
+setTimeout(() => {
+  try {
+    const lib = JSON.parse(fs.readFileSync(LIB_FILE, 'utf8'));
+    const queries = [];
+    for (const h of (lib.history || []).slice(-40).reverse()) {
+      let q = '';
+      try { q = h.stream_url ? new URL(h.stream_url, 'http://localhost').searchParams.get('q') : ''; } catch {}
+      q = q || [h.name, h.artist].filter(Boolean).join(' ');
+      if (!q || queries.includes(streamKey(q))) continue;
+      queries.push(streamKey(q));
+      if (queries.length >= 5) break;
+    }
+    for (const q of queries) warmStream(q);
+  } catch {}
+}, 5000);
+
 /* ============================================================
    SPOTIFY (client-credentials, app-level search — no login popup)
    Keys come from .env: SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET
@@ -704,29 +1100,10 @@ app.get('/stream', async (req, res) => {
   if (!query) return res.status(400).json({ error: 'Missing ?q=' });
 
   try {
-    const searchResults = await ytdlp('ytsearch1:' + query + ' audio', {
-      dumpSingleJson: true,
-      noWarnings: true,
-    });
-    const video = searchResults.entries[0];
-    if (!video) return res.status(404).json({ error: 'No YouTube result found' });
-
-    const audioFormats = (video.formats || []).filter(
-      (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
-    );
-    audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0));
-    const best = audioFormats[0];
-    if (!best || !best.url) return res.status(404).json({ error: 'No audio stream found' });
-
-    res.json({
-      title: video.title,
-      duration: video.duration,
-      audio_url: best.url,
-      proxied_url: `/audio?u=${encodeURIComponent(best.url)}`, // same-origin -> enables Web Audio EQ
-      bitrate: best.abr,
-      ext: best.ext,
-      video_id: video.id,
-    });
+    const data = await getStream(query);
+    if (data.error) return res.status(data.status || 500).json({ error: data.error });
+    res.set('X-WP-Stream-Cache', data.cache || 'miss');
+    res.json(data);
   } catch (error) {
     console.error('Stream Error:', error.message);
     res.status(500).json({ error: 'Could not get audio stream' });
@@ -742,7 +1119,7 @@ app.get('/resolve', async (req, res) => {
   if (!/^https?:\/\//.test(url)) return res.status(400).json({ error: 'Missing ?url=' });
 
   try {
-    const info = await ytdlp(url, { dumpSingleJson: true, noWarnings: true });
+    const info = await ytdlp(url, { dumpSingleJson: true, noWarnings: true, ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}) });
     const audioFormats = (info.formats || []).filter(
       (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
     );
@@ -758,6 +1135,8 @@ app.get('/resolve', async (req, res) => {
       bitrate: best.abr,
       ext: best.ext,
       extractor: info.extractor_key,
+      video_id: info.id || null,
+      title: info.title,
     });
   } catch (error) {
     console.error('Resolve Error:', error.message);
@@ -772,26 +1151,75 @@ app.get('/resolve', async (req, res) => {
 app.get('/audio', async (req, res) => {
   const { u, range: skipRange } = req.query;
   if (!u) return res.status(400).json({ error: 'Missing ?u=' });
+  let target;
+  try { target = new URL(String(u)); } catch { return res.status(400).json({ error: 'Invalid URL' }); }
+  if (target.protocol !== 'https:' || target.username || target.password) {
+    return res.status(400).json({ error: 'Invalid audio URL' });
+  }
+  if (net.isIP(target.hostname) && blockedIP(target.hostname)) {
+    return res.status(400).json({ error: 'Blocked audio host' });
+  }
 
-  try {
-    const headers = { 'User-Agent': 'Mozilla/5.0' };
-    if (!skipRange && req.headers.range) headers.Range = req.headers.range;
-    const upstream = await axios.get(u, { headers, responseType: 'stream', timeout: 20000 });
-    const h = upstream.headers;
+  // Signed googlevideo URLs are bound to the tunnel egress IP. Fetch them as
+  // UID 999 (ytdlp) so this proxy uses the same Mullvad split tunnel.
+  const range = !skipRange && req.headers.range ? String(req.headers.range) : '';
+  const helper = path.join(__dirname, 'audio-proxy-helper.js');
+  const child = spawn('/usr/bin/setpriv', [
+    '--reuid=ytdlp', '--regid=ytdlp', '--init-groups',
+    'env', 'HOME=/var/lib/ytdlp', '/usr/bin/node', helper, target.toString(), range,
+  ], { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let buf = Buffer.alloc(0);
+  let parsed = false;
+  let stderr = '';
+  let clientClosed = false;
+  child.stderr.on('data', (c) => {
+    stderr += c.toString();
+    if (stderr.length > 2000) stderr = stderr.slice(-2000);
+  });
+  child.stdout.on('data', (chunk) => {
+    if (clientClosed) return;
+    if (parsed) { res.write(chunk); return; }
+    buf = Buffer.concat([buf, chunk]);
+    const nl = buf.indexOf(0x0a);
+    if (nl < 0) return;
+    const line = buf.slice(0, nl).toString('utf8');
+    const rest = buf.slice(nl + 1);
+    buf = Buffer.alloc(0);
+    parsed = true;
+    let meta = null;
+    try { meta = JSON.parse(line); } catch { meta = null; }
+    if (!meta || !meta.headers) {
+      if (!res.headersSent) res.status(502).json({ error: 'Audio proxy failed' });
+      child.kill();
+      return;
+    }
+    const h = meta.headers;
     if (h['content-type']) res.setHeader('Content-Type', h['content-type']);
     if (h['content-length']) res.setHeader('Content-Length', h['content-length']);
     if (h['content-range']) res.setHeader('Content-Range', h['content-range']);
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'no-store');
-    res.status(h['content-range'] ? 206 : 200);
-    upstream.data.pipe(res);
-    // clean up on client disconnect
-    res.on('close', () => upstream.data.destroy());
-  } catch (error) {
+    res.status(h['content-range'] ? 206 : (meta.status || 200));
+    if (rest.length) res.write(rest);
+  });
+  child.on('error', (error) => {
     console.error('Audio Proxy Error:', error.message);
     if (!res.headersSent) res.status(502).json({ error: 'Audio proxy failed' });
-    else res.end();
-  }
+  });
+  child.on('close', (code) => {
+    if (clientClosed) return;
+    if (code !== 0 && !res.headersSent) {
+      console.error('Audio Proxy Error:', stderr.trim() || `exit ${code}`);
+      res.status(502).json({ error: 'Audio proxy failed' });
+    } else if (res.headersSent) {
+      res.end();
+    }
+  });
+  res.on('close', () => {
+    clientClosed = true;
+    if (!child.killed) child.kill();
+  });
 });
 
 /* ============================================================

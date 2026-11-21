@@ -36,12 +36,12 @@ Push-Location (Join-Path $root 'wicked-frontend'); npm run build 2>&1 | Out-Null
 
 # 3. package exe + metadata
 Write-Host '[2/4] packaging exe...' -ForegroundColor Gray
-Push-Location $PSScriptRoot; npx electron-builder -w 2>&1 | Out-Null; node make-latest.js; Pop-Location
+Push-Location $PSScriptRoot; npx electron-builder -w 2>&1 | Out-Null; Pop-Location
 
 $dist = Join-Path $PSScriptRoot 'dist'
 $assets = @(
-  @{ n = "Wicked.Player.Setup.$V.exe"; p = Join-Path $dist "Wicked Player Setup $V.exe" },
-  @{ n = "Wicked.Player.Setup.$V.exe.blockmap"; p = Join-Path $dist "Wicked Player Setup $V.exe.blockmap" },
+  @{ n = "Wicked-Player-Setup-$V.exe"; p = Join-Path $dist "Wicked Player Setup $V.exe" },
+  @{ n = "Wicked-Player-Setup-$V.exe.blockmap"; p = Join-Path $dist "Wicked Player Setup $V.exe.blockmap" },
   @{ n = 'latest.yml'; p = Join-Path $dist 'latest.yml' }
 )
 foreach ($a in $assets) { if (-not (Test-Path $a.p)) { Write-Host "!! missing $($a.p)" -ForegroundColor Red; exit 1 } }

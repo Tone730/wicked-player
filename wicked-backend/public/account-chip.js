@@ -5,14 +5,18 @@
   if (window.__wpChipLoaded) return;
   window.__wpChipLoaded = true;
 
-  const user = window.__WP_USER || null;
+  const getUser = () => window.__WP_USER || null;
 
-  // feed the community module the authenticated identity so profiles line up
-  try {
-    if (user && user.username) {
-      localStorage.setItem('wp-me', JSON.stringify({ name: user.username }));
-    }
-  } catch {}
+  // feed the community module the authenticated identity so profiles line up.
+  // The server injects __WP_USER at the start of <head>; re-check here as well
+  // in case a cached page injects it later.
+  const seedIdentity = () => {
+    try {
+      const u = getUser();
+      if (u && u.username) localStorage.setItem('wp-me', JSON.stringify({ name: u.username }));
+    } catch {}
+  };
+  seedIdentity();
 
   const css = document.createElement('style');
   css.textContent = `
@@ -31,6 +35,8 @@
   document.head.appendChild(css);
 
   function render() {
+    seedIdentity();
+    const user = getUser();
     let chip = document.getElementById('wp-chip');
     if (!user) { if (chip) chip.remove(); return; }
     if (!chip) {
@@ -38,9 +44,11 @@
       chip.id = 'wp-chip';
       document.body.appendChild(chip);
     }
-    const adminLink = user.role === 'admin' ? ' <a class="wp-admin-link" href="/admin">ADMIN</a>' : '';
+    const adminLink = user.role === 'admin' ? ' <a class="wp-admin-link" href="https://wickedplayer.dev/admin" target="_blank" rel="noopener">ADMIN</a>' : '';
     const av = user.discord && user.discord.avatar ? `<img src="${user.discord.avatar}" />` : '';
-    chip.innerHTML = `${av}<span><b>${user.username}</b> <span class="role">${user.role.toUpperCase()}</span>${adminLink}</span><button id="wp-gift" title="Gifts & premium">&#127873;</button><button id="wp-key" title="Change password">🔑</button><button id="wp-logout">Log out</button>`;
+    chip.innerHTML = `${av}<span><b>${user.username}</b> <span class="role">${user.role.toUpperCase()}</span>${adminLink}</span><button id="wp-profile-studio-btn" title="Profile Studio">🎨</button><button id="wp-gift" title="Gifts & premium">&#127873;</button><button id="wp-key" title="Change password">🔑</button><button id="wp-logout">Log out</button>`;
+    const studioBtn = document.getElementById('wp-profile-studio-btn');
+    if (studioBtn) studioBtn.onclick = function () { if (window.wpOpenProfileStudio) window.wpOpenProfileStudio(); };
     const giftBtn = document.getElementById('wp-gift');
     if (giftBtn) giftBtn.onclick = function () { if (window.__wpGiftModal) window.__wpGiftModal(); };
     const keyBtn = document.getElementById('wp-key');

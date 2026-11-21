@@ -1,87 +1,45 @@
-# Prediction Market Arbitrage Bot
+# Wicked Player
 
-Concept inspired by the YouTube video: "I Built a Polymarket + Kalshi Arbitrage Bot (7 Day Results)" by Alex Carter.
+Ad-free music player with effects, lyrics, overlays, community profiles and Discord Rich Presence.
 
-## Overview
+## Download / Update
 
-This project implements a prediction market arbitrage bot that exploits price differences between **Polymarket** and **Kalshi** - two popular prediction markets where users can trade on event outcomes.
+**Latest release (v3.5.8):** https://github.com/Tone730/wicked-player/releases/latest
 
-### How Arbitrage Works
+Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.8.exe
 
-Prediction markets often have slight price discrepancies for the same event across different platforms. The arbitrage strategy:
+Install once and the app auto-updates from GitHub (`latest.yml`). Existing installs from 3.5.0 onward pick up new releases automatically.
 
-1. **Monitor** prices for the same event on both platforms
-2. **Detect** when one platform prices an outcome differently than the other
-3. **Buy** on the cheaper market (lower price = better value)
-4. **Sell** on the more expensive market (higher price = better exit)
-5. **Lock in** risk-free profit regardless of the actual outcome
+## What's in v3.5.8
 
-### Mathematical Foundation
+- **Auto-configured Discord presence** — profile-driven details, state, album art, buttons and paused status, with reconnect/retry.
+- **CustomRP preset export** — generate a `.crp` file for your own profile or a friend's public profile.
+- **Profile Studio** — banners, animated/glowing tags, motion backgrounds, card shapes and premium effects.
+- **Hosted mode** — the desktop app connects straight to `https://wickedplayer.dev`. No local server, cookies, VPN or proxy setup is needed; playback fixes run server-side.
+- Smaller installer, faster updates.
 
-```
-Profit = |Price1 - Price2| / min(Price1, Price2) × 100%
+## Repository layout
 
-Example:
-- Polymarket: YES token = 52.3¢
-- Kalshi:     YES token = 51.1¢
-- Action: Buy on Kalshi at 51.1¢, sell on Polymarket at 52.3¢
-- Profit: (52.3 - 51.1) / 51.1 × 100% = 2.35%
-- With $1,000 capital: $1000 × 2.35% = $23.50 profit
-```
+- `electron/` — Electron desktop app, electron-builder config and release publisher.
+- `wicked-frontend/dist/` — built web UI shipped in the installer (`enhance.js?ov=14`, asset bundle `index-2kADS7Vh-p3.js`).
+- `wicked-backend/` — source for the hosted server deployed at `wickedplayer.dev`.
 
-### Project Structure
+## Building the desktop app
 
-```
-arbitrage_bot.py    - Main bot with API integration framework
-arbitrage_demo.py   - Simplified demo with simulated prices
-README.md           - This file
+```powershell
+cd electron
+npm install
+npx electron-builder -w
 ```
 
-### Key Components
+The installer is written to `electron/dist/`. `release.ps1 -Bump` builds, publishes a GitHub release and uploads the installer, blockmap and `latest.yml`.
 
-1. **PredictionMarketAPI** - Abstract base class for market integrations
-2. **PolymarketAPI** - Polymarket platform integration (0-100 percentage format)
-3. **KalshiAPI** - Kalshi platform integration (0-100 percentage format)
-4. **ArbitrageDetector** - Finds price discrepancies between markets
-5. **ArbitrageBot** - Executes the monitoring and trading loop
-6. **ArbitrageDemo** - Simplified demonstration with mock data
+Security note: the installer deliberately bundles **no** backend code and **no** `.env`. Only `discord-app.json` (public client ID + invite) is included. Do not add credentials to `electron/` or to `electron-builder.yml`.
 
-### How to Run
+## Running the hosted backend
 
-```bash
-# Install dependencies (none required for this pure Python script)
-python arbitrage_demo.py
-```
+The backend in `wicked-backend/` is deployed on the server. It requires a private `.env` (never committed) with `PORT`, `ADMIN_USER`, `ADMIN_PASS`, `ADMIN_KEY`, `ALLOW_REGISTRATION` and the Discord/Spotify OAuth settings. Start it with `node server.js`.
 
-The demo will:
-- Monitor sample events for arbitrage opportunities
-- Display any detected spreads with profit percentages
-- Show buy/sell platforms and recommended actions
+## Support
 
-### Important Notes
-
-⚠️ **Educational Purpose**: This code is for educational and demonstration purposes only.
-
-⚠️ **Real Trading Risks**: Actual prediction market arbitrage involves:
-- Transaction fees on both platforms
-- Withdrawal/deposit delays
-- Order execution slippage
-- Minimum trade sizes
-- Platform-specific restrictions
-- Potential for price changes between order placement and execution
-
-⚠️ **API Keys Required**: To trade with real funds, you'll need:
-- Polymarket API key (for clobder API)
-- Kalshi API key and secret (for their REST API)
-
-⚠️ **Market Hours**: Prediction markets may have different trading hours and settlement times.
-
-### Potential Improvements
-
-- Real-time WebSocket price feeds
-- Order book depth analysis
-- Multiple event filtering
-- Risk management position sizing
-- Historical performance tracking
-- Multi-market arbitrage (more than 2 platforms)
-- Automated trade execution with proper signing
+Report issues at https://github.com/Tone730/wicked-player/issues.

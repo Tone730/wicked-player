@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('wickedUpdates', {
     return function () { ipcRenderer.removeListener('hotkey', h); };
   },
   presence: function (track, playing) { ipcRenderer.send('presence', { track: track, playing: playing }); },
+  presenceConfig: function (cfg) { ipcRenderer.send('presence:config', cfg); },
+  setPresenceEnabled: function (on) { ipcRenderer.send('presence:enabled', !!on); },
+  getPresenceStatus: function () { return ipcRenderer.invoke('presence:status'); },
   winctl: function (a) { ipcRenderer.send('winctl', a); },
   onMini: function (cb) {
     var h = function (_e, on) { try { cb(on); } catch (e) {} };

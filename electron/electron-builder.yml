@@ -12,27 +12,13 @@ files:
   - main.js
   - preload.js
   - icon.png
+  - node_modules/**/*
 
+# Hosted-only app: no local backend and no .env are bundled.
 extraResources:
   - from: ../wicked-frontend/dist
     to: app-ui
-  - from: ../wicked-backend/server.js
-    to: backend/server.js
-  - from: ../wicked-backend/community.js
-    to: backend/community.js
-  - from: ../wicked-backend/auth.js
-    to: backend/auth.js
-  - from: ../wicked-backend/.env
-    to: backend/.env
-  - from: ../wicked-backend/package.json
-    to: backend/package.json
-  - from: ../wicked-backend/public
-    to: backend/public
-  - from: ../wicked-backend/node_modules
-    to: backend/node_modules
-  - from: ../wicked-backend/.env
-    to: backend/.env
-  - from: ../wicked-backend/data/discord-app.json
+  - from: discord-app.json
     to: backend/data/discord-app.json
 
 protocols:
