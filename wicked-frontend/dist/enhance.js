@@ -19,22 +19,130 @@
 
   /* ---- 0. auth guard: never show "backend asleep" when it's just a logout ---- */
   const _origFetch = window.fetch;
+  const notificationPolicy = window.wpNotificationPolicy || {
+    classifyResponse(url, method, status) {
+      if (status === 429) return { kind: 'busy', message: 'Wicked Player is busy — retrying…', notify: true, retry: true };
+      if (status < 500) return null;
+      const path = String(url || '').split('?')[0];
+      if (path.endsWith('/stream') || path.endsWith('/audio')) {
+        return { kind: 'playback', message: "Couldn't play this track", notify: false, retry: false };
+      }
+      const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method || 'GET').toUpperCase());
+      if (mutation && (/profile|playlists|premium|reward|referrals/.test(path))) {
+        return { kind: 'save', message: 'Save failed (' + status + '). Please try again.', notify: true, retry: false };
+      }
+      return { kind: 'ignored', message: null, notify: false, retry: false };
+    },
+    createNotificationDeduper() {
+      const seen = new Map();
+      return (message, now = Date.now()) => {
+        for (const [key, at] of seen) if (now - at >= 5000) seen.delete(key);
+        if (seen.has(message) && now - seen.get(message) < 5000) return false;
+        seen.set(message, now);
+        return true;
+      };
+    },
+  };
+  const shouldNotify = notificationPolicy.createNotificationDeduper(5000);
 
   // stream resolve cache: instant re-play of tracks you already loaded
   const STREAM_KEY = 'wp-stream-cache';
   const streamMem = (() => { try { return JSON.parse(sessionStorage.getItem(STREAM_KEY) || '{}'); } catch { return {}; } })();
   const saveStream = () => { try { sessionStorage.setItem(STREAM_KEY, JSON.stringify(streamMem)); } catch {} };
+  /* Older builds persisted 30-second provider previews in this cache. Remove
+     them on upgrade so they cannot shadow a newer full-resolution stream. */
+  let removedCachedPreview = false;
+  for (const key of Object.keys(streamMem)) {
+    if (streamMem[key]?.data?.preview) {
+      delete streamMem[key];
+      removedCachedPreview = true;
+    }
+  }
+  if (removedCachedPreview) saveStream();
 
   // Map the proxied audio URL back to its resolver data (including video_id).
   const streamByAudio = new Map();
+  const previewUpgrades = new Map();
   const wpPrefetched = new Set();
   let adjacentTimer = null;
+
+  function normalizedAudioUrl(value) {
+    try {
+      const url = new URL(String(value || ''), location.origin);
+      return url.pathname + url.search;
+    } catch {
+      return String(value || '');
+    }
+  }
+
+  function applyFullStream(preview, full) {
+    const audio = getAudio();
+    if (!audio || !preview?.proxied_url || !full?.proxied_url) return false;
+    const current = normalizedAudioUrl(audio.currentSrc || audio.src);
+    const expected = normalizedAudioUrl(preview.proxied_url);
+    if (!current || current !== expected) return false;
+
+    const wasPlaying = !audio.paused;
+    const resumeAt = Number(audio.currentTime) || 0;
+    const nextSource = new URL(full.proxied_url, location.origin).toString();
+    const resume = () => {
+      try {
+        if (resumeAt > 0 && Math.abs((audio.currentTime || 0) - resumeAt) > 0.5) {
+          audio.currentTime = resumeAt;
+        }
+        if (wasPlaying) audio.play().catch(() => {});
+      } catch {}
+    };
+    audio.addEventListener('loadedmetadata', resume, { once: true });
+    audio.src = nextSource;
+    try { audio.load(); } catch {}
+    setTimeout(resume, 1200);
+    return true;
+  }
+
+  function schedulePreviewUpgrade(key, preview) {
+    if (!key || !preview?.preview) return;
+    if (previewUpgrades.has(key)) return;
+    const state = { stopped: false, attempts: 0 };
+    previewUpgrades.set(key, state);
+
+    const poll = async () => {
+      if (state.stopped) return;
+      state.attempts++;
+      try {
+        const response = await _origFetch('/stream?q=' + encodeURIComponent(key), { credentials: 'include' });
+        if (response.ok) {
+          const data = await response.json();
+          if (data?.audio_url && !data.preview) {
+            state.stopped = true;
+            previewUpgrades.delete(key);
+            rememberStream(key, data, false);
+            applyFullStream(preview, data);
+            return;
+          }
+        }
+      } catch {}
+      if (state.attempts >= 30 || state.stopped) {
+        previewUpgrades.delete(key);
+        return;
+      }
+      setTimeout(poll, 1500);
+    };
+    setTimeout(poll, 1200);
+  }
+
   function rememberStream(key, data, schedule) {
     if (!data || !data.proxied_url) return;
-    streamMem[key] = { at: Date.now(), data };
+    /* Provider previews are a fast fallback, not a full-resolution cache.
+       Keep them for the current audio element, but never let one shadow the
+       complete stream that the server resolves in the background. */
+    if (!data.preview) {
+      streamMem[key] = { at: Date.now(), data };
+      saveStream();
+    }
     streamByAudio.set(location.origin + data.proxied_url, data);
     streamByAudio.set(data.proxied_url, data);
-    saveStream();
+    if (data.preview) schedulePreviewUpgrade(key, data);
     if (schedule) { try { scheduleAdjacentPrefetch(key); } catch {} }
   }
   for (const k of Object.keys(streamMem)) {
@@ -42,6 +150,7 @@
   }
 
   function wpNotify(message) {
+    if (!shouldNotify(message)) return;
     try {
       let box = document.getElementById('wp-toast-box');
       if (!box) {
@@ -60,6 +169,12 @@
 
   window.fetch = function (...args) {
     let url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+    const method = String((args[1] && args[1].method) || (args[0] && args[0].method) || 'GET').toUpperCase();
+    const classify = (res) => {
+      const action = notificationPolicy.classifyResponse(url, method, res.status);
+      if (action && action.notify && action.message) wpNotify(action.message);
+      return action;
+    };
     const sm = /\?q=([^&]+)/.exec(url);
     if (url.includes('/stream?q=') && sm) {
       const key = decodeURIComponent(sm[1]).toLowerCase();
@@ -68,7 +183,18 @@
         rememberStream(key, hit.data, false);
         return Promise.resolve(new Response(JSON.stringify(hit.data), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
-      return _origFetch.apply(this, args).then((res) => {
+      return _origFetch.apply(this, args).then(async (res) => {
+        const action = classify(res);
+        if (action && action.retry) {
+          await new Promise((r) => setTimeout(r, 1500));
+          const retried = await _origFetch.apply(this, args);
+          if (retried.ok) {
+            retried.clone().json().then((data) => { rememberStream(key, data); }).catch(() => {});
+          } else {
+            classify(retried);
+          }
+          return retried;
+        }
         if (res.ok) {
           res.clone().json().then((data) => { rememberStream(key, data); }).catch(() => {});
         }
@@ -86,15 +212,14 @@
       return res;
     };
     return _origFetch.apply(this, args).then(async (res) => {
-      if (res.status === 429 || res.status >= 500) {
-        wpNotify(res.status === 429 ? 'Wicked Player is busy — retrying…' : 'Save failed (' + res.status + '). Please try again.');
-        /* A 429 used to be swallowed by callers, so playlists looked like they
-           silently failed to save. Retry idempotent GETs once. */
-        const method = String((args[1] && args[1].method) || 'GET').toUpperCase();
-        if (res.status === 429 && method === 'GET' && !(args[1] && args[1].body)) {
-          await new Promise((r) => setTimeout(r, 1500));
-          return inspect(await _origFetch.apply(this, args));
-        }
+      const action = classify(res);
+      /* A 429 used to be swallowed by callers, so playlists looked like they
+         silently failed to save. Retry idempotent GETs once. */
+      if (action && action.retry && method === 'GET' && !(args[1] && args[1].body)) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const retried = await _origFetch.apply(this, args);
+        classify(retried);
+        return inspect(retried);
       }
       return inspect(res);
     });
@@ -170,7 +295,11 @@
     if (!key || wpPrefetched.has(key)) return;
     wpPrefetched.add(key);
     if (wpPrefetched.size > 120) wpPrefetched.delete(wpPrefetched.values().next().value);
-    fetch('/stream?q=' + encodeURIComponent(q), { credentials: 'include' }).catch(() => {});
+    fetch('/api/stream-cache/warm', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: String(q || '').slice(0, 200) }),
+    }).catch(() => {});
   }
   function scheduleAdjacentPrefetch(key) {
     clearTimeout(adjacentTimer);

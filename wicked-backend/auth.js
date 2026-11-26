@@ -1122,7 +1122,7 @@ const PUBLIC_PREFIXES = [
   '/pitch-worklet.js', '/media/', '/genre-art', '/favicon',
 ];
 const PROTECTED_PREFIXES = [
-  '/search', '/suggest', '/radio', '/stream', '/audio', '/lyrics', '/resolve',
+  '/search', '/genre', '/suggest', '/radio', '/stream', '/audio', '/lyrics', '/resolve',
   '/import', '/library', '/upload', '/api/', '/genre-art-refresh', '/discord/say',
 ];
 function isPublicPath(p, method) {

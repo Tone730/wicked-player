@@ -4,9 +4,9 @@ Ad-free music player with effects, lyrics, overlays, community profiles and Disc
 
 ## Download / Update
 
-**Latest release (v3.5.11):** https://github.com/Tone730/wicked-player/releases/latest
+**Latest release (v3.5.12):** https://github.com/Tone730/wicked-player/releases/latest
 
-Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.11.exe
+Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.12.exe
 
 Install once and the app auto-updates from GitHub (`latest.yml`). Existing installs from 3.5.0 onward pick up new releases automatically.
 
@@ -24,22 +24,20 @@ Install once and the app auto-updates from GitHub (`latest.yml`). Existing insta
 
 ![Wicked Player Discord presence settings](docs/screenshots/04-presence.png)
 
-## What's in v3.5.11
+## What's in v3.5.12
 
-- **Reliable cover art** — fixed the player state probe so Discord actually receives the current track's title, artist and album art instead of silently getting no state.
-- **Faster startup** — hosted mode reads the saved home server directly and skips the bundled backend wait entirely.
-- **Lower CPU usage** — state polling dropped from 500 ms to 1 s, with duplicate overlay and tray updates skipped.
-- **Track-aware Discord presence** — your Discord activity shows the song title and artist that is actually playing, even when you have custom profile presence text.
-- **Auto-configured Discord presence** — profile-driven details, state, buttons and paused status, with reconnect/retry.
-- **CustomRP preset export** — generate a `.crp` file for your own profile or a friend's public profile.
-- **Profile Studio** — banners, animated/glowing tags, motion backgrounds, card shapes and premium effects.
+- **Accurate genre cards** — all 40 genre cards now use a dedicated, genre-constrained catalog route instead of generic keyword results.
+- **Faster search and playback** — bounded search, serialized background warm-up, immediate provider previews and cached full-resolution upgrades reduce stalls.
+- **Reliable track matching** — fallback playback rejects fuzzy matches from a different artist and resolves only the selected track.
+- **Cleaner error reporting** — playback failures and rate limits are reported accurately without misleading “Saved” or “Save failed (502)” popups.
+- **Safe preview caching** — short provider previews never block a later full-resolution stream, and legacy preview entries are removed on upgrade.
 - **Hosted mode** — the desktop app connects straight to `https://wickedplayer.dev`. No local server, cookies, VPN or proxy setup is needed; playback fixes run server-side.
 - Smaller installer, faster updates.
 
 ## Repository layout
 
 - `electron/` — Electron desktop app, electron-builder config and release publisher.
-- `wicked-frontend/dist/` — built web UI shipped in the installer (`enhance.js?ov=14`, asset bundle `index-2kADS7Vh-p3.js`).
+- `wicked-frontend/dist/` — authoritative compiled web UI shipped in the installer (`enhance.js?ov=15`, asset bundle `index-2kADS7Vh-p4.js`).
 - `wicked-backend/` — source for the hosted server deployed at `wickedplayer.dev`.
 - `docs/screenshots/` — real screenshots used on this page.
 

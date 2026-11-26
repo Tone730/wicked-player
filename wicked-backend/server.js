@@ -40,6 +40,18 @@ const server = http.createServer(app);
 /* baseline security headers, request ids, and rate limits */
 const { applyHardening } = require('./lib/hardening');
 const { readJSON, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
+const {
+  canonicalGenreName,
+  collectWithin,
+  genreDefinition,
+  genreMatches,
+  isFullStream,
+  makeStreamUrl,
+  mergeTracks,
+  pickBestMatchingTrack,
+  safePreviewUrl,
+  trackMatchScore,
+} = require('./lib/music-catalog');
 const accessLog = require('./lib/access-log');
 applyHardening(app);
 app.use(accessLog.middleware);
@@ -380,118 +392,246 @@ app.get('/api/stats', (req, res) => {
 
 
 /* ============================================================
-   SEARCH: iTunes Search API (free, no auth, millions of songs)
-============================================================ */
-app.get('/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query) return res.status(400).json({ error: 'Missing ?q= search term' });
+   CATALOG: bounded text search + true genre browsing
+   ============================================================ */
+const CATALOG_RESPONSE_BUDGET_MS = Math.max(500, Math.min(5000,
+  Number(process.env.CATALOG_RESPONSE_BUDGET_MS) || 2500));
+const PROVIDER_TIMEOUT_MS = Math.max(1000, Math.min(8000,
+  Number(process.env.CATALOG_PROVIDER_TIMEOUT_MS) || 3500));
+const GENRE_CACHE_TTL_MS = Math.max(1, Math.min(1800,
+  Number(process.env.GENRE_CACHE_TTL_MIN) || 10)) * 60 * 1000;
+const PREVIEW_CACHE_TTL_MS = Math.max(5, Math.min(180,
+  Number(process.env.PREVIEW_CACHE_TTL_MIN) || 45)) * 60 * 1000;
+const genreCache = new Map();
+const previewCache = new Map();
 
-  /* Start resolving the literal query in the background immediately, in parallel
-     with the catalog APIs. By the time the user sees results and clicks, the
-     slow YouTube lookup is usually already cached or in flight. */
-  warmStream(query);
-
-  const one = (p) => p.then((v) => v).catch(() => []);
-
-  /* --- iTunes (previews + metadata, fast, no auth) --- */
-  const itunesP = one(axios.get('https://itunes.apple.com/search', {
-    params: { term: query, media: 'music', entity: 'song', limit: 25 },
-    timeout: 10000,
-  }).then((response) => response.data.results.map((t) => ({
+function catalogKey(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+function streamQueryFor(name, artist) {
+  return [name, artist].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+function rememberPreview(query, previewUrl, title, duration) {
+  const safe = safePreviewUrl(previewUrl);
+  if (!safe) return null;
+  const key = catalogKey(query);
+  if (!key) return null;
+  const data = {
+    title: title || '',
+    duration: duration || 30,
+    audio_url: safe,
+    proxied_url: `/audio?u=${encodeURIComponent(safe)}`,
+    bitrate: 128,
+    ext: /\.m4a(?:$|\?)/i.test(safe) ? 'm4a' : 'mp3',
+    source: 'provider-preview',
+    preview: true,
+    expiresAt: Date.now() + PREVIEW_CACHE_TTL_MS,
+  };
+  previewCache.set(key, data);
+  if (previewCache.size > 1000) {
+    const oldest = previewCache.keys().next().value;
+    previewCache.delete(oldest);
+  }
+  return data;
+}
+function previewFor(query) {
+  const key = catalogKey(query);
+  const hit = previewCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    previewCache.delete(key);
+    return null;
+  }
+  const { expiresAt, ...data } = hit;
+  return data;
+}
+function mapItunesTrack(t, genre = null) {
+  const name = t.trackName || '';
+  const artist = t.artistName || '';
+  const query = streamQueryFor(name, artist);
+  const preview = t.previewUrl || null;
+  rememberPreview(query, preview, name, 30);
+  return {
     id: `it-${t.trackId}`,
-    name: t.trackName,
-    artist: t.artistName,
+    name,
+    artist,
     album: t.collectionName,
     art: t.artworkUrl100 ? t.artworkUrl100.replace('100x100', '600x600') : null,
     duration_ms: t.trackTimeMillis,
-    genre: t.primaryGenreName,
-    preview_url: t.previewUrl,
-    stream_url: `/stream?q=${encodeURIComponent(t.trackName + ' ' + t.artistName)}`,
+    genre: genre || t.primaryGenreName || null,
+    preview_url: preview,
+    stream_url: makeStreamUrl(query, preview),
     src: 'itunes',
-  }))));
-
-  /* --- Deezer (keyless, huge catalog, 30s previews) --- */
-  const deezerP = one(axios.get('https://api.deezer.com/search', {
-    params: { q: query, limit: 25 },
-    timeout: 10000,
-  }).then((response) => (response.data.data || []).map((t) => ({
+  };
+}
+function mapDeezerTrack(t) {
+  const name = t.title_short || t.title || '';
+  const artist = t.artist?.name || 'Unknown';
+  const query = streamQueryFor(name, artist);
+  const preview = t.preview || null;
+  rememberPreview(query, preview, name, 30);
+  return {
     id: `dz-${t.id}`,
-    name: t.title_short || t.title,
-    artist: t.artist?.name || 'Unknown',
+    name,
+    artist,
     album: t.album?.title || '',
     art: t.album?.cover_big || t.album?.cover_medium || null,
     duration_ms: (t.duration || 0) * 1000,
     genre: null,
-    preview_url: t.preview || null,
-    stream_url: `/stream?q=${encodeURIComponent((t.title_short || t.title) + ' ' + (t.artist?.name || ''))}`,
+    preview_url: preview,
+    stream_url: makeStreamUrl(query, preview),
     src: 'deezer',
-  }))));
+  };
+}
+function mapSpotifyCatalogTrack(t, genre = null) {
+  const name = t.name || '';
+  const artists = (t.artists || []).map((a) => a.name).filter(Boolean);
+  const artist = artists.join(', ');
+  const query = streamQueryFor(name, artists[0] || artist);
+  const preview = t.preview_url || null;
+  rememberPreview(query, preview, name, 30);
+  return {
+    id: `sp-${t.id}`,
+    name,
+    artist,
+    album: t.album?.name || '',
+    art: t.album?.images?.[0]?.url || null,
+    duration_ms: t.duration_ms || 0,
+    genre,
+    preview_url: preview,
+    stream_url: makeStreamUrl(query, preview),
+    src: 'spotify',
+  };
+}
+function attachExactPreview(track) {
+  try {
+    const query = new URL(track.stream_url, 'http://localhost').searchParams.get('q');
+    const preview = previewFor(query);
+    if (!preview) return;
+    track.preview_url = preview.audio_url;
+    track.stream_url = makeStreamUrl(query, preview.audio_url);
+  } catch {}
+}
+
+app.get('/search', async (req, res) => {
+  const query = String(req.query.q || '').trim().slice(0, 200);
+  if (!query) return res.status(400).json({ error: 'Missing ?q= search term' });
+
+  const one = (promise) => promise.catch(() => []);
+
+  /* --- iTunes (previews + metadata, fast, no auth) --- */
+  const itunesP = one(axios.get('https://itunes.apple.com/search', {
+    params: { term: query, media: 'music', entity: 'song', limit: 25 },
+    timeout: PROVIDER_TIMEOUT_MS,
+  }).then((response) => (response.data.results || []).map((track) => mapItunesTrack(track))));
+
+  /* --- Deezer (keyless, huge catalog, 30s previews) --- */
+  const deezerP = one(axios.get('https://api.deezer.com/search', {
+    params: { q: query, limit: 25 },
+    timeout: PROVIDER_TIMEOUT_MS,
+  }).then((response) => (response.data.data || []).map(mapDeezerTrack)));
 
   /* --- Spotify (official catalog via client-credentials, optional) --- */
   const spotifyP = one(getSpotifyToken().then(async (tok) => {
     if (!tok) return [];
     try {
       const r = await axios.get('https://api.spotify.com/v1/search', {
-        params: { q: query, type: 'track', limit: 10 },
+        params: { q: query, type: 'track', limit: 10, market: 'US' },
         headers: { Authorization: `Bearer ${tok}` },
-        timeout: 10000,
+        timeout: PROVIDER_TIMEOUT_MS,
       });
-      return (r.data.tracks?.items || []).map((t) => ({
-        id: `sp-${t.id}`,
-        name: t.name,
-        artist: (t.artists || []).map((a) => a.name).join(', '),
-        album: t.album?.name || '',
-        art: t.album?.images?.[0]?.url || null,
-        duration_ms: t.duration_ms || 0,
-        genre: null,
-        preview_url: t.preview_url || null,
-        stream_url: `/stream?q=${encodeURIComponent(t.name + ' ' + (t.artists?.[0]?.name || ''))}`,
-        src: 'spotify',
-      }));
+      return (r.data.tracks?.items || []).map((t) => mapSpotifyCatalogTrack(t));
     } catch (e) {
       console.error(`Spotify search failed: ${e.message}`);
       return [];
     }
   }));
 
-  /* Search in parallel: iTunes + Deefer first (fast, no auth), Spotify optional */
-  const [it, dz, sp] = await Promise.all([itunesP, deezerP, spotifyP]);
+  /* Return as soon as the useful providers answer. A slow optional provider
+     must never hold the whole search hostage. */
+  const [it, dz, sp] = await collectWithin(
+    [itunesP, deezerP, spotifyP], CATALOG_RESPONSE_BUDGET_MS);
+  const merged = mergeTracks([sp, it, dz], query);
+  if (!merged.length) return res.status(503).json({ error: 'Search temporarily unavailable' });
+  merged.forEach(attachExactPreview);
 
-  /* merge + dedupe: iTunes + Deezer first (fastest), then Spotify if available */
-  const seen = new Set();
-  const merged = [];
-  for (const t of [...sp, ...it, ...dz]) {
-    if (!t?.name || !t.stream_url) continue;
-    const key = (t.name + '|' + t.artist).toLowerCase().replace(/\s+/g, ' ');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(t);
-  }
-  if (!merged.length) return res.status(500).json({ error: 'Search failed' });
-  // relevance sort: exact title match first, then starts-with, then contains
-  var qLower = query.toLowerCase();
-  merged.sort(function (a, b) {
-    var aN = (a.name || '').toLowerCase();
-    var bN = (b.name || '').toLowerCase();
-    var aS = 0, bS = 0;
-    if (aN === qLower) aS -= 100;
-    if (bN === qLower) bS -= 100;
-    if (aN.indexOf(qLower) === 0) aS -= 50;
-    if (bN.indexOf(qLower) === 0) bS -= 50;
-    if (aN.indexOf(qLower) !== -1) aS -= 10;
-    if (bN.indexOf(qLower) !== -1) bS -= 10;
-    return aS - bS;
-  });
+  res.set('Cache-Control', 'private, max-age=30');
+  res.json(merged);
 
-  /* Warm the top few real result queries (the ones users are most likely to
-     click) without delaying the search response. The queue is serialized so
-     we never spawn several expensive yt-dlp processes at once. */
-  for (const t of merged.slice(0, 3)) {
+  /* Warm only the most likely click. The queue is serialized and yields to
+     foreground playback, so search never competes with the selected track. */
+  const first = merged[0];
+  if (first) {
     try {
-      warmStream(new URL(t.stream_url, 'http://localhost').searchParams.get('q'));
+      const queryToWarm = new URL(first.stream_url, 'http://localhost').searchParams.get('q');
+      setImmediate(() => warmStream(queryToWarm));
     } catch {}
   }
+});
+
+/* Genre cards use a dedicated endpoint and a curated provider query from
+   the shared catalog vocabulary. Spotify genre filters are used where they
+   exist; iTunes results are accepted only when their own primaryGenreName
+   matches the selected genre. */
+app.get('/genre', async (req, res) => {
+  const requested = canonicalGenreName(req.query.genre || req.query.q);
+  const definition = genreDefinition(requested);
+  if (!requested || !definition) return res.status(400).json({ error: 'Unknown genre' });
+
+  const cacheKey = catalogKey(requested);
+  const cached = genreCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    res.set('Cache-Control', 'private, max-age=60');
+    return res.json(cached.data);
+  }
+
+  const spotifyQuery = definition.spotifyQuery;
+  const one = (promise) => promise.catch(() => []);
+
+  const spotifyP = one(getSpotifyToken().then(async (tok) => {
+    if (!tok) return [];
+    try {
+      const pages = await Promise.all([0, 10, 20].map(async (offset) => {
+        const r = await axios.get('https://api.spotify.com/v1/search', {
+          params: { q: spotifyQuery, type: 'track', limit: 10, offset, market: 'US' },
+          headers: { Authorization: `Bearer ${tok}` },
+          timeout: PROVIDER_TIMEOUT_MS,
+        });
+        return (r.data.tracks?.items || []).map((t) => mapSpotifyCatalogTrack(t, requested));
+      }));
+      return pages.flat();
+    } catch (e) {
+      console.error(`Spotify genre search failed: ${e.message}`);
+      return [];
+    }
+  }));
+
+  const itunesP = one(axios.get('https://itunes.apple.com/search', {
+    params: { term: requested, media: 'music', entity: 'song', limit: 50 },
+    timeout: PROVIDER_TIMEOUT_MS,
+  }).then((response) => (response.data.results || [])
+    .filter((t) => genreMatches(t.primaryGenreName, requested))
+    .map((t) => mapItunesTrack(t, requested))));
+
+  const [sp, it] = await collectWithin(
+    [spotifyP, itunesP], CATALOG_RESPONSE_BUDGET_MS);
+  const merged = mergeTracks([sp, it], '', 40);
+  if (!merged.length) return res.status(404).json({ error: `No ${requested} tracks found` });
+  merged.forEach(attachExactPreview);
+
+  genreCache.set(cacheKey, { data: merged, expiresAt: Date.now() + GENRE_CACHE_TTL_MS });
+  if (genreCache.size > 40) genreCache.delete(genreCache.keys().next().value);
+
+  res.set('Cache-Control', 'private, max-age=60');
   res.json(merged);
+
+  const first = merged[0];
+  if (first) {
+    try {
+      const queryToWarm = new URL(first.stream_url, 'http://localhost').searchParams.get('q');
+      setImmediate(() => warmStream(queryToWarm));
+    } catch {}
+  }
 });
 
 /* is Spotify connected? (UI badge) */
@@ -842,12 +982,12 @@ const STREAM_CACHE_MAX = Math.max(50, Math.min(10000, Number(process.env.STREAM_
 const STREAM_WARM_MAX = Math.max(4, Math.min(200, Number(process.env.STREAM_WARM_MAX) || 40));
 const streamCache = new Map();
 const streamPending = new Map();
-const streamStats = { hits: 0, misses: 0, dedupes: 0, warmed: 0, fallbacks: 0, evictions: 0 };
+const streamStats = { hits: 0, misses: 0, dedupes: 0, warmed: 0, fallbacks: 0, evictions: 0, previews: 0 };
 const streamFallback = require('./stream-fallback');
 try {
   const saved = JSON.parse(fs.readFileSync(STREAM_CACHE_FILE, 'utf8'));
   for (const [k, v] of Object.entries(saved)) {
-    if (v && v.expiresAt > Date.now()) streamCache.set(k, v);
+    if (v && v.expiresAt > Date.now() && isFullStream(v.data)) streamCache.set(k, v);
   }
 } catch {}
 let streamCacheDirty = false;
@@ -855,7 +995,8 @@ function pruneStreamCache(force) {
   const now = Date.now();
   let changed = false;
   for (const [k, v] of streamCache) {
-    if (!v || !(v.expiresAt > now) || (v.data && audioUrlExpiry(v.data.audio_url) <= now)) {
+    if (!v || !(v.expiresAt > now) || (v.data && !isFullStream(v.data))
+      || (v.data && audioUrlExpiry(v.data.audio_url) <= now)) {
       streamCache.delete(k);
       changed = true;
     }
@@ -890,63 +1031,137 @@ function streamExpiry(data) {
   return exp;
 }
 const RETRYABLE_STREAM_ERROR = /sign in to confirm|bot|403|429|temporarily unavailable|requested format is not available|unable to extract|timeout|timed out|connection reset|http error 5\d\d/i;
+const STREAM_RESOLVE_TIMEOUT_MS = Math.max(5000, Math.min(30000,
+  Number(process.env.STREAM_RESOLVE_TIMEOUT_MS) || 12000));
+const STREAM_SEARCH_TIMEOUT_MS = Math.max(2000, Math.min(10000,
+  Number(process.env.STREAM_SEARCH_TIMEOUT_MS) || 6500));
+const STREAM_RESOLVE_BUDGET_MS = Math.max(10000, Math.min(45000,
+  Number(process.env.STREAM_RESOLVE_BUDGET_MS) || 26000));
+
+function ytdlpOptions(timeoutMs) {
+  return {
+    timeout: Math.max(1000, timeoutMs),
+    killSignal: 'SIGKILL',
+  };
+}
+
+function ytdlpFlags(extra = {}) {
+  return {
+    noWarnings: true,
+    ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}),
+    ...extra,
+  };
+}
+
+function youtubeCandidates(entries) {
+  return (entries || []).map((entry) => ({
+    ...entry,
+    name: entry.title || '',
+    artist: entry.uploader || entry.uploaderName || entry.channel || '',
+  }));
+}
+
 async function resolveFreshStream(query) {
-  const attempts = [
-    { q: 'ytsearch1:' + query + ' audio' },
-    { q: 'ytsearch1:' + query },
-    { q: 'ytsearch3:' + query + ' audio' },
-  ];
+  /* Search flat, select a genuinely matching video, then extract only that
+     video. The old ytsearch3 path extracted three complete videos and was the
+     main source of 50-140 second resolutions. */
+  const deadline = Date.now() + STREAM_RESOLVE_BUDGET_MS;
+  const searchQueries = ['ytsearch5:' + query, 'ytsearch5:' + query + ' audio'];
+  const candidates = [];
+  const seenVideoIds = new Set();
   let lastErr = null;
   let botBlocked = false;
-  for (let i = 0; i < attempts.length; i++) {
-    try {
-      const searchResults = await ytdlp(attempts[i].q, {
-        dumpSingleJson: true,
-        noWarnings: true, ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}),
-      });
-      const videos = (searchResults && searchResults.entries) || (searchResults && searchResults.id ? [searchResults] : []);
-      for (const video of videos) {
-        const audioFormats = (video.formats || []).filter(
-          (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none') && f.url
-        );
-        audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0));
-        const best = audioFormats[0];
-        if (!best) continue;
-        return {
-          title: video.title,
-          duration: video.duration,
-          audio_url: best.url,
-          proxied_url: `/audio?u=${encodeURIComponent(best.url)}`,
-          bitrate: best.abr,
-          ext: best.ext,
-          video_id: video.id,
-          ...(i ? { retry: i } : {}),
-        };
-      }
-      lastErr = new Error(videos.length ? 'No audio stream found' : 'No YouTube result found');
-      if (i === attempts.length - 1) break; // fall through to fallback sources
-    } catch (e) {
-      lastErr = e;
-      const msg = String(e && e.message || e);
-      if (/sign in to confirm|bot/i.test(msg)) { botBlocked = true; break; }
-      if (!RETRYABLE_STREAM_ERROR.test(msg)) break;
-      if (i === attempts.length - 1) break;
-    }
-    await new Promise((r) => setTimeout(r, 250 * (i + 1)));
-  }
-  const reason = String(lastErr && lastErr.message || lastErr || 'resolve failed').slice(0, 160);
-  console.error('Stream resolve failed after retries: ' + reason);
 
-  // Auto-healing: privacy frontends, then short previews, then peer rotation
-  // (triggered from noteBotFailure). A fallback result is cached like a normal hit.
-  try {
-    const fb = await streamFallback.resolve(query, reason);
-    if (fb && fb.audio_url) {
-      streamStats.fallbacks++;
-      return { ...fb, cache: 'fallback', fallbackReason: reason };
+  for (const searchQuery of searchQueries) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      lastErr = new Error('Stream resolution deadline exceeded');
+      break;
     }
-  } catch (e) {
-    console.error('Stream fallback failed: ' + (e && e.message || e));
+    try {
+      const result = await ytdlp(searchQuery, ytdlpFlags({
+        flatPlaylist: true,
+        dumpSingleJson: true,
+      }), ytdlpOptions(Math.min(STREAM_SEARCH_TIMEOUT_MS, remaining)));
+      const entries = (result && result.entries) || [];
+      for (const candidate of youtubeCandidates(entries)) {
+        const score = trackMatchScore(candidate, query);
+        if (score < 140 || !candidate.id || seenVideoIds.has(candidate.id)) continue;
+        seenVideoIds.add(candidate.id);
+        candidates.push({ candidate, score });
+      }
+      if (candidates.length) break;
+      lastErr = new Error('No matching YouTube result found');
+    } catch (error) {
+      lastErr = error;
+      const message = String(error && error.message || error);
+      if (/sign in to confirm|bot/i.test(message)) {
+        botBlocked = true;
+        break;
+      }
+      if (!RETRYABLE_STREAM_ERROR.test(message)) break;
+    }
+  }
+
+  candidates.sort((left, right) => right.score - left.score);
+  for (let index = 0; index < Math.min(2, candidates.length); index++) {
+    const candidate = candidates[index].candidate;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      lastErr = new Error('Stream resolution deadline exceeded');
+      break;
+    }
+    try {
+      const videoUrl = candidate.url || 'https://www.youtube.com/watch?v=' + encodeURIComponent(candidate.id);
+      const video = await ytdlp(videoUrl, ytdlpFlags({
+        dumpSingleJson: true,
+      }), ytdlpOptions(Math.min(STREAM_RESOLVE_TIMEOUT_MS, remaining)));
+      const audioFormats = (video.formats || []).filter(
+        (format) => format.acodec && format.acodec !== 'none'
+          && (!format.vcodec || format.vcodec === 'none') && format.url
+      );
+      audioFormats.sort((left, right) => (right.abr || 0) - (left.abr || 0));
+      const best = audioFormats[0];
+      if (!best) {
+        lastErr = new Error('No audio stream found');
+        continue;
+      }
+      return {
+        title: video.title,
+        duration: video.duration,
+        audio_url: best.url,
+        proxied_url: `/audio?u=${encodeURIComponent(best.url)}`,
+        bitrate: best.abr,
+        ext: best.ext,
+        video_id: video.id,
+        art: video.thumbnail || null,
+        source: 'youtube',
+        ...(index ? { retry: index } : {}),
+      };
+    } catch (error) {
+      lastErr = error;
+      const message = String(error && error.message || error);
+      if (/sign in to confirm|bot/i.test(message)) {
+        botBlocked = true;
+        break;
+      }
+      if (!RETRYABLE_STREAM_ERROR.test(message)) break;
+    }
+  }
+
+  const reason = String(lastErr && lastErr.message || lastErr || 'resolve failed').slice(0, 160);
+  console.error('Stream resolve failed after bounded attempts: ' + reason);
+
+  /* Auto-healing: privacy frontends, then short previews, then peer rotation
+     (triggered from noteBotFailure). A fallback result is cached like a normal hit. */
+  try {
+    const fallback = await streamFallback.resolve(query, reason);
+    if (fallback && fallback.audio_url) {
+      streamStats.fallbacks++;
+      return { ...fallback, cache: 'fallback', fallbackReason: reason };
+    }
+  } catch (error) {
+    console.error('Stream fallback failed: ' + (error && error.message || error));
   }
   alerts.record('stream-failure', 'critical', 'All stream sources failed for a track', { query, reason });
   return {
@@ -956,22 +1171,38 @@ async function resolveFreshStream(query) {
     status: 502,
   };
 }
-function getStream(query) {
+function getStream(query, options = {}) {
   const key = streamKey(query);
   pruneStreamCache(false);
   const hit = streamCache.get(key);
-  if (hit && hit.expiresAt > Date.now() && audioUrlExpiry(hit.data.audio_url) > Date.now()) {
+  if (hit && isFullStream(hit.data) && hit.expiresAt > Date.now()
+    && audioUrlExpiry(hit.data.audio_url) > Date.now()) {
     streamStats.hits++;
     return Promise.resolve({ ...hit.data, cache: 'hit' });
   }
   if (hit) { streamCache.delete(key); streamCacheDirty = true; }
+
+  const preview = options.allowPreview === false ? null : previewFor(query);
   if (streamPending.has(key)) {
     streamStats.dedupes++;
+    if (preview) {
+      streamStats.previews++;
+      return Promise.resolve({ ...preview, cache: 'preview' });
+    }
     return streamPending.get(key);
   }
+
+  /* A foreground click supersedes a queued warm-up for the same track. */
+  const queuedAt = warmQueue.indexOf(key);
+  if (queuedAt >= 0) warmQueue.splice(queuedAt, 1);
+
   const p = resolveFreshStream(query).then((data) => {
     if (data.error) return data;
     streamStats.misses++;
+    if (!isFullStream(data)) {
+      rememberPreview(query, data.audio_url, data.title, data.duration);
+      return { ...data, cache: 'preview' };
+    }
     const rec = { data, expiresAt: streamExpiry(data) };
     if (rec.expiresAt <= Date.now()) return { ...data, cache: 'miss' };
     streamCache.set(key, rec);
@@ -984,8 +1215,18 @@ function getStream(query) {
       if (oldest) { streamCache.delete(oldest[0]); streamStats.evictions++; }
     }
     return { ...data, cache: 'miss' };
+  }).catch((error) => {
+    console.error('Stream resolver failed:', error && error.message || error);
+    return { error: 'Stream unavailable right now', status: 502 };
   }).finally(() => streamPending.delete(key));
   streamPending.set(key, p);
+
+  /* Provider previews start playback immediately while the complete stream is
+     resolved and cached in the background for the next play. */
+  if (preview) {
+    streamStats.previews++;
+    return Promise.resolve({ ...preview, cache: 'preview' });
+  }
   return p;
 }
 const warmQueue = [];
@@ -993,20 +1234,33 @@ let warming = false;
 function warmStream(q) {
   const key = streamKey(q);
   const hit = streamCache.get(key);
-  if (!key || (hit && hit.expiresAt > Date.now() && audioUrlExpiry(hit.data.audio_url) > Date.now()) || streamPending.has(key) || warmQueue.includes(key)) return;
+  if (!key || (hit && isFullStream(hit.data) && hit.expiresAt > Date.now()
+    && audioUrlExpiry(hit.data.audio_url) > Date.now()) || streamPending.has(key) || warmQueue.includes(key)) return;
   warmQueue.push(key);
   if (warmQueue.length > STREAM_WARM_MAX) warmQueue.shift();
   if (!warming) { warming = true; setImmediate(drainWarmQueue); }
 }
 async function drainWarmQueue() {
-  while (warmQueue.length) {
-    const q = warmQueue.shift();
-    try {
-      const r = await getStream(q);
-      if (!r || !r.error) streamStats.warmed++;
-    } catch {}
+  try {
+    while (warmQueue.length) {
+      /* Background work never competes with a selected track. */
+      if (streamPending.size) {
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
+      const q = warmQueue.shift();
+      try {
+        const r = await getStream(q, { allowPreview: false });
+        if (!r || !r.error) streamStats.warmed++;
+      } catch {}
+    }
+  } finally {
+    warming = false;
+    if (warmQueue.length && !warming) {
+      warming = true;
+      setImmediate(drainWarmQueue);
+    }
   }
-  warming = false;
 }
 
 /* Small observability endpoint for the stream resolver cache. */
@@ -1019,11 +1273,13 @@ app.get('/api/stream-cache/stats', (req, res) => {
     entries: streamCache.size,
     pending: streamPending.size,
     queued: warmQueue.length,
+    previewEntries: previewCache.size,
     max: STREAM_CACHE_MAX,
     hits: streamStats.hits,
     misses: streamStats.misses,
     dedupes: streamStats.dedupes,
     warmed: streamStats.warmed,
+    previews: streamStats.previews,
     fallbacks: streamStats.fallbacks,
     evictions: streamStats.evictions,
     oldestExpiresAt: oldest && oldest.expiresAt,
@@ -1078,35 +1334,50 @@ setTimeout(() => {
    SPOTIFY (client-credentials, app-level search — no login popup)
    Keys come from .env: SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET
 ============================================================ */
-let spToken = null, spTokenAt = 0;
+let spToken = null, spTokenAt = 0, spTokenFailedAt = 0, spTokenPending = null;
 async function getSpotifyToken() {
   if (!process.env.SPOTIFY_CLIENT_ID || !process.env.SPOTIFY_CLIENT_SECRET) return null;
   if (spToken && Date.now() - spTokenAt < 3300 * 1000) return spToken;
-  try {
-    const r = await axios.post('https://accounts.spotify.com/api/token',
-      new URLSearchParams({ grant_type: 'client_credentials' }).toString(),
-      {
-        auth: { username: process.env.SPOTIFY_CLIENT_ID, password: process.env.SPOTIFY_CLIENT_SECRET },
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        timeout: 10000,
-      });
-    spToken = r.data.access_token; spTokenAt = Date.now();
-    return spToken;
-  } catch (e) { console.error('Spotify token failed:', e.message); return null; }
+  if (spTokenFailedAt && Date.now() - spTokenFailedAt < 30000) return null;
+  if (spTokenPending) return spTokenPending;
+  spTokenPending = (async () => {
+    try {
+      const r = await axios.post('https://accounts.spotify.com/api/token',
+        new URLSearchParams({ grant_type: 'client_credentials' }).toString(),
+        {
+          auth: { username: process.env.SPOTIFY_CLIENT_ID, password: process.env.SPOTIFY_CLIENT_SECRET },
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: Math.min(3000, PROVIDER_TIMEOUT_MS),
+        });
+      spToken = r.data.access_token; spTokenAt = Date.now(); spTokenFailedAt = 0;
+      return spToken;
+    } catch (e) {
+      spTokenFailedAt = Date.now();
+      console.error('Spotify token failed:', e.message);
+      return null;
+    } finally {
+      spTokenPending = null;
+    }
+  })();
+  return spTokenPending;
 }
 
 app.get('/stream', async (req, res) => {
-  const query = req.query.q;
+  const query = String(req.query.q || '').trim().slice(0, 200);
   if (!query) return res.status(400).json({ error: 'Missing ?q=' });
+
+  const preview = String(req.query.preview || '').trim();
+  if (preview) rememberPreview(query, preview, query, 30);
 
   try {
     const data = await getStream(query);
-    if (data.error) return res.status(data.status || 500).json({ error: data.error });
+    if (data.error) return res.status(data.status || 502).json({ error: data.error });
     res.set('X-WP-Stream-Cache', data.cache || 'miss');
+    res.set('X-WP-Stream-Source', data.source || 'youtube');
     res.json(data);
   } catch (error) {
-    console.error('Stream Error:', error.message);
-    res.status(500).json({ error: 'Could not get audio stream' });
+    console.error('Stream Error:', error && error.message || error);
+    res.status(502).json({ error: 'Could not get audio stream' });
   }
 });
 
@@ -1261,7 +1532,7 @@ app.get('/import', async (req, res) => {
         art,
         duration_ms: durMs,
         preview_url: t.audioPreview?.url || null,
-        stream_url: `/stream?q=${encodeURIComponent(name + ' ' + artist)}`,
+        stream_url: makeStreamUrl(name + ' ' + artist, t.audioPreview?.url || null),
       };
     });
 
@@ -1309,16 +1580,22 @@ async function getUserToken() {
   } catch { return null; }
 }
 function mapSpotifyTrack(t) {
+  const name = t.name || '';
+  const artists = (t.artists || []).map((a) => a.name).filter(Boolean);
+  const artist = artists.join(', ');
+  const query = streamQueryFor(name, artists[0] || artist);
+  const preview = t.preview_url || null;
+  rememberPreview(query, preview, name, 30);
   return {
     id: 'sp-' + t.id,
-    name: t.name,
-    artist: (t.artists || []).map((a) => a.name).join(', '),
+    name,
+    artist,
     album: t.album?.name || '',
     art: t.album?.images?.[0]?.url || null,
     duration_ms: t.duration_ms || 0,
     genre: null,
-    preview_url: t.preview_url || null,
-    stream_url: '/stream?q=' + encodeURIComponent(t.name + ' ' + (t.artists?.[0]?.name || '')),
+    preview_url: preview,
+    stream_url: makeStreamUrl(query, preview),
     src: 'spotify',
   };
 }
@@ -1433,7 +1710,8 @@ app.get('/api/spotify/liked', async (req, res) => {
   const UI_DIR = UI_CANDIDATES.find((c) => fs.existsSync(path.join(c, 'index.html'))) || UI_CANDIDATES[0];
   app.use(express.static(UI_DIR, { index: false, maxAge: '1h', setHeaders: (res, p) => {
     const f = path.basename(p).toLowerCase();
-    if (p.endsWith('.html') || f.startsWith('enhance.') || f.startsWith('account-chip.')) {
+    if (p.endsWith('.html') || f.startsWith('enhance.') || f.startsWith('account-chip.')
+      || f.startsWith('notification-policy.')) {
       res.setHeader('Cache-Control', 'no-cache');
     }
   } }));
