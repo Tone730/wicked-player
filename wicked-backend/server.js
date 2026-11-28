@@ -41,6 +41,11 @@ const server = http.createServer(app);
 const { applyHardening } = require('./lib/hardening');
 const { readJSON, readJSONStrict, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
 const {
+  readCommunityStore,
+  readCodesStore,
+  readRewardsStore,
+} = require('./lib/premium-store');
+const {
   canonicalGenreName,
   collectWithin,
   genreDefinition,
@@ -774,12 +779,13 @@ function premiumRewardLabel(type) {
     : 'Premium redeemed automatically (30 days active)';
 }
 function readRewards() {
-  const saved = readJSONStrict(rewardsFile, { issued: [] });
-  return saved && Array.isArray(saved.issued) ? saved : { issued: [] };
+  /* A reward store with a broken shape is a corrupt store, not an empty one:
+     replacing it with { issued: [] } would silently drop issued rewards. */
+  return readRewardsStore(rewardsFile);
 }
 function writeRewards(d) { atomicWriteJSON(rewardsFile, d); }
 function rewardRedemptionState(rewards) {
-  const comm = readJSONStrict(communityFile, { profiles: {} });
+  const comm = readCommunityStore(communityFile);
   const receipts = comm && comm.premiumRedemptions && typeof comm.premiumRedemptions === 'object'
     ? comm.premiumRedemptions
     : {};
@@ -815,8 +821,8 @@ function commitPremiumReward(d, rw, req, now) {
   let comm;
   let codes;
   try {
-    comm = readJSONStrict(communityFile, { profiles: {} });
-    codes = readJSONStrict(codesFile, {});
+    comm = readCommunityStore(communityFile);
+    codes = readCodesStore(codesFile);
   } catch (error) {
     process.stderr.write(`[rewards] store read failed: ${error && error.message || error}\n`);
     return { ok: false, status: 503, message: 'The premium store is unavailable. Please try again.' };
@@ -831,7 +837,10 @@ function commitPremiumReward(d, rw, req, now) {
       premiumCode: rw.premiumCode,
       type: rw.type,
       id: rw.redemptionId,
-      now: Number(rw.at) || now,
+      /* The entitlement starts when the grant is committed, not when the
+         reward was issued: a retry days later must still grant a full
+         duration instead of a period that is already over. */
+      now,
     });
   } catch (error) {
     const status = error instanceof PremiumRedemptionError ? error.status : 503;
@@ -975,8 +984,8 @@ app.post('/api/reward/issue', (req, res) => {
     let comm;
     let codes;
     try {
-      comm = readJSONStrict(communityFile, { profiles: {} });
-      codes = readJSONStrict(codesFile, {});
+      comm = readCommunityStore(communityFile);
+      codes = readCodesStore(codesFile);
     } catch (error) {
       process.stderr.write(`[rewards] store read failed: ${error && error.message || error}\n`);
       return res.status(503).json({ error: 'The premium store is unavailable. Please try again.' });
@@ -1094,13 +1103,36 @@ app.post('/api/admin/reward/claim', adminAuth, (req, res) => {
   }
   const rw = d.issued.find((r) => r && r.code === code);
   if (!rw) return res.status(404).json({ error: 'Unknown code' });
-  /* Only a committed receipt proves the premium was actually redeemed. A
-     legacy premium reward without one is still a manual Discord claim. */
+  /* Only a committed receipt proves the premium was actually redeemed. */
   const receipts = comm && comm.premiumRedemptions && typeof comm.premiumRedemptions === 'object'
     ? comm.premiumRedemptions
     : {};
   const receipt = rw.redemptionId ? receipts[rw.redemptionId] : null;
-  const alreadyRedeemed = Boolean(rw.autoRedeemed || receipt);
+
+  /* An automatic reward without a receipt never received its premium. It is
+     retried here with the same redemption id instead of being marked as
+     claimed, so it stays redeemable instead of being stranded. */
+  if (rw.redemptionId && !receipt) {
+    if (!rw.premiumCode) {
+      return res.status(409).json({
+        error: 'This reward has not been redeemed yet and cannot be redeemed automatically.',
+        code: 'REWARD_NOT_REDEEMED',
+      });
+    }
+    rw.status = 'pending_redemption';
+    const retried = commitPremiumReward(d, rw, req, Date.now());
+    if (!retried.ok) {
+      rw.status = 'failed';
+      rw.failure = retried.message;
+      try { writeRewards(d); } catch {}
+      return res.status(retried.status).json({ error: retried.message });
+    }
+    return res.json({ ok: true, alreadyRedeemed: true, reward: rw });
+  }
+
+  /* Legacy rewards (issued before automatic redemption existed) have no
+     redemption id and are still claimed by hand in Discord. */
+  const alreadyRedeemed = Boolean(receipt);
   rw.claimed = true;
   rw.claimedAt = rw.claimedAt || Date.now();
   rw.claimMethod = alreadyRedeemed ? 'automatic' : 'discord';

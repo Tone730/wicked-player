@@ -80,6 +80,32 @@ test('provider preview resolution rejects non-HTTPS preview URLs', async () => {
   assert.equal(preview, null);
 });
 
+test('provider preview resolution does not wait for the slower provider', async () => {
+  let itunesSettled = false;
+  const started = Date.now();
+  const preview = await resolveProviderPreview('Lorde Green Light', {
+    getJson: async (provider) => {
+      if (provider === 'itunes') {
+        /* The slow provider must not delay an already usable preview. */
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        itunesSettled = true;
+        return { data: { results: [] } };
+      }
+      return {
+        data: [{
+          title_short: 'Green Light',
+          artist: { name: 'Lorde' },
+          preview: 'https://cdn.example.test/deezer.mp3',
+        }],
+      };
+    },
+  });
+
+  assert.equal(preview.audio_url, 'https://cdn.example.test/deezer.mp3');
+  assert.ok(Date.now() - started < 250, 'the preview waited for the slow provider');
+  assert.equal(itunesSettled, false);
+});
+
 test('fast preview playback wins without cancelling full resolution', async () => {
   let fullFinished = false;
   const full = new Promise((resolve) => {

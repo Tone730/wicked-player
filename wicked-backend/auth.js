@@ -10,7 +10,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { readJSON, readJSONStrict, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
+const { readJSON, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
 const accessLog = require('./lib/access-log');
 const {
   GiftError,
@@ -23,6 +23,12 @@ const {
   listPremiumRedemptions,
   redeemPremiumCode,
 } = require('./lib/premium-redemptions');
+const {
+  PremiumStoreError,
+  readCommunityStore,
+  readCodesStore,
+  readRewardsStore,
+} = require('./lib/premium-store');
 
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'accounts.json');
@@ -196,8 +202,14 @@ function serveFile(res, name, status = 200) {
   res.status(status).sendFile(p);
 }
 function premiumProfile(name) {
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-  return (comm.profiles || {})[name] || null;
+  /* A broken community store must never be read as "no premium" and then
+     written back as an empty document, so the read fails closed. */
+  try {
+    const comm = readCommunityStrict();
+    return (comm.profiles || {})[name] || null;
+  } catch {
+    return null;
+  }
 }
 
 function injectUser(html, user) {
@@ -255,10 +267,11 @@ router.post('/auth/register', (req, res) => {
     return res.status(500).json({ error: 'Could not save your account. Please try again.' });
   }
   /* New accounts get a real community profile immediately — otherwise their
-     public profile 404s until the first manual profile save. */
+     public profile 404s until the first manual profile save. A corrupt
+     community document is never rewritten: the account is created and the
+     bootstrap is retried later instead of erasing the stored profiles. */
   try {
-    const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-    comm.profiles = comm.profiles || {};
+    const comm = readCommunityStrict();
     if (!comm.profiles[username]) {
       comm.profiles[username] = { friends: [], requests: [], outgoing: [], createdAt: Date.now() };
       atomicWriteJSON(COMM_FILE, comm);
@@ -404,8 +417,13 @@ router.get('/api/online-users', (_req, res) => {
 router.post('/api/presence/np', (req, res) => {
   const u = userFromReq(req);
   if (!u) return res.status(401).json({ error: 'Login required', auth: true });
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-  comm.profiles = comm.profiles || {};
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] presence read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'Presence is unavailable right now.' });
+  }
   const prof = comm.profiles[u.username] || {};
   prof.np = {
     title: String((req.body && req.body.title) || '').slice(0, 120),
@@ -414,7 +432,12 @@ router.post('/api/presence/np', (req, res) => {
     at: Date.now(),
   };
   comm.profiles[u.username] = prof;
-  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  try {
+    atomicWriteJSON(COMM_FILE, comm);
+  } catch (error) {
+    process.stderr.write(`[auth] presence save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'Presence could not be saved.' });
+  }
   res.json({ ok: true });
 });
 
@@ -427,9 +450,11 @@ function readJsonSafe(file, fallback) {
   return readJSON(file, fallback);
 }
 /* Authoritative stores must fail closed: a corrupt community file may never be
-   replaced with an empty document by a redemption request. */
+   replaced with an empty document by a redemption request. The store reader
+   also validates the document shape, so a structurally broken file (for
+   example "profiles": []) is rejected instead of silently dropping a grant. */
 function readCommunityStrict() {
-  return readJSONStrict(COMM_FILE, { profiles: {} });
+  return readCommunityStore(COMM_FILE);
 }
 function appendActivity(type, req, extra) {
   const u = userFromReq(req);
@@ -550,9 +575,11 @@ router.post("/api/reward/redeem", (req, res) => {
 
   let codes;
   let comm;
+  let rewardStore;
   try {
-    codes = readJSONStrict(CODES_FILE, {});
+    codes = readCodesStore(CODES_FILE);
     comm = readCommunityStrict();
+    rewardStore = readRewardsStore(path.join(DATA_DIR, 'rewards.json'));
   } catch (error) {
     process.stderr.write(`[auth] premium code read failed: ${error && error.message || error}\n`);
     return res.status(503).json({ error: "The redemption store is unavailable. Please try again." });
@@ -560,10 +587,11 @@ router.post("/api/reward/redeem", (req, res) => {
   let result;
   try {
     /* Legacy reward codes were stored without their duration. The reward that
-       issued the code still knows whether it was a 7-day jackpot. */
-    const rewardStore = readJsonSafe(path.join(DATA_DIR, 'rewards.json'), { issued: [] });
+       issued the code still knows whether it was a 7-day jackpot. The reward
+       store is read strictly, so an unavailable store fails the redemption
+       instead of silently turning a 7-day jackpot into 30 days. */
     const hints = {};
-    for (const reward of (Array.isArray(rewardStore.issued) ? rewardStore.issued : [])) {
+    for (const reward of rewardStore.issued) {
       if (!reward || !reward.premiumCode) continue;
       hints[String(reward.premiumCode).toUpperCase()] = {
         type: reward.type,
@@ -581,6 +609,10 @@ router.post("/api/reward/redeem", (req, res) => {
   } catch (error) {
     if (error instanceof PremiumRedemptionError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
+    }
+    if (error instanceof PremiumStoreError) {
+      process.stderr.write(`[auth] premium code store invalid: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: "The redemption store is unavailable. Please try again." });
     }
     throw error;
   }
@@ -656,7 +688,10 @@ router.post('/api/premium/gift', (req, res) => {
     return res.status(400).json({ error: 'Choose 7 or 30 days', code: 'INVALID_DAYS' });
   }
   const requestId = String(req.body.requestId || '').trim();
-  if (requestId && !/^[A-Za-z0-9_-]{8,64}$/.test(requestId)) {
+  /* Every gift carries an idempotency key. Without it a retry has no way to
+     recognise the original request and could grant premium twice, so the
+     request is rejected instead of being processed without a duplicate guard. */
+  if (!requestId || !/^[A-Za-z0-9_-]{8,64}$/.test(requestId)) {
     return res.status(400).json({ error: 'Invalid gift request id', code: 'INVALID_REQUEST_ID' });
   }
   let comm;
@@ -682,6 +717,10 @@ router.post('/api/premium/gift', (req, res) => {
   } catch (error) {
     if (error instanceof GiftError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
+    }
+    if (error instanceof PremiumStoreError) {
+      process.stderr.write(`[auth] premium gift store invalid: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: 'The gift store is unavailable. Please try again.' });
     }
     throw error;
   }
@@ -770,58 +809,85 @@ router.post('/api/referrals/apply', (req, res) => {
   const me = users[u.username];
   if (me.referredBy) return res.status(409).json({ error: 'You already used a referral code' });
   const ref = users[owner];
-  const count = (Number(ref.referralCount) || 0) + 1;
+
+  /* The community document is read before anything is counted: a corrupt store
+     must not leave a referral recorded without its premium reward. */
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] referral premium read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The referral store is unavailable. Please try again.' });
+  }
+
+  const previousCount = Number(ref.referralCount) || 0;
+  const count = previousCount + 1;
+  const now = Date.now();
+  /* The committed receipts are the source of truth for how many referral
+     rewards were already granted, so a restart can never pay the same
+     threshold twice. */
+  const awarded = Object.values(comm.premiumRedemptions)
+    .filter((row) => row && row.kind === 'referral' && row.user === owner).length;
+  const redemptionId = `referral:${owner}:${count}`;
+  const shouldReward = count >= (awarded + 1) * 3;
+  const alreadyRewarded = Boolean(comm.premiumRedemptions[redemptionId]);
+
   ref.referralCount = count;
   me.referredBy = owner;
-  saveUsers();
 
-  // Every 3 referrals rewards the referrer with 7 days of premium.
-  const rewarded = Number(ref.referralRewarded) || 0;
-  if (count >= (rewarded + 1) * 3) {
-    let comm;
+  if (shouldReward && !alreadyRewarded) {
+    const granted = grantPremiumDays(comm.profiles, owner, 7, 'referral:' + count, now);
+    comm.premiumRedemptions[redemptionId] = {
+      id: redemptionId,
+      kind: 'referral',
+      user: owner,
+      redeemedBy: owner,
+      issuedBy: 'referral:' + count,
+      code: 'referral:' + count,
+      days: 7,
+      at: now,
+      redeemedAt: now,
+      status: 'redeemed',
+      autoRedeemed: true,
+      until: granted.until,
+      source: 'referral:' + count,
+    };
     try {
-      comm = readCommunityStrict();
+      /* The grant and its receipt land in one community write, and a lifetime
+         recipient keeps lifetime instead of being downgraded to 7 days. */
+      atomicWriteJSON(COMM_FILE, comm);
     } catch (error) {
-      process.stderr.write(`[auth] referral premium read failed: ${error && error.message || error}\n`);
-      comm = null;
+      process.stderr.write(`[auth] referral premium save failed: ${error && error.message || error}\n`);
+      /* Roll the referral back so the same code can be retried cleanly. */
+      ref.referralCount = previousCount;
+      delete me.referredBy;
+      return res.status(503).json({ error: 'The referral reward could not be saved. Please try again.' });
     }
-    if (comm) {
-      comm.profiles = comm.profiles || {};
-      comm.premiumRedemptions = comm.premiumRedemptions && typeof comm.premiumRedemptions === 'object'
-        ? comm.premiumRedemptions
-        : {};
-      const now = Date.now();
-      const redemptionId = crypto.randomUUID();
-      const granted = grantPremiumDays(comm.profiles, owner, 7, 'referral:' + count, now);
-      comm.premiumRedemptions[redemptionId] = {
-        id: redemptionId,
-        kind: 'referral',
-        user: owner,
-        redeemedBy: owner,
-        issuedBy: 'referral:' + count,
-        code: 'referral:' + count,
-        days: 7,
-        at: now,
-        redeemedAt: now,
-        status: 'redeemed',
-        autoRedeemed: true,
-        until: granted.until,
-        source: 'referral:' + count,
-      };
-      try {
-        /* The grant and its receipt land in one community write, and a lifetime
-           recipient keeps lifetime instead of being downgraded to 7 days. */
-        atomicWriteJSON(COMM_FILE, comm);
-        ref.referralRewarded = rewarded + 1;
-        saveUsers();
-        logRedemption(comm.premiumRedemptions[redemptionId]);
-        appendActivity('referral-reward', req, { owner, count, redemptionId, status: 'redeemed' });
-        try { if (premiumRedemptionEmitter) premiumRedemptionEmitter(comm.premiumRedemptions[redemptionId]); } catch {}
-      } catch (error) {
-        process.stderr.write(`[auth] referral premium save failed: ${error && error.message || error}\n`);
-      }
-    }
+    ref.referralRewarded = awarded + 1;
+    logRedemption(comm.premiumRedemptions[redemptionId]);
+    appendActivity('referral-reward', req, { owner, count, redemptionId, status: 'redeemed' });
+    try { if (premiumRedemptionEmitter) premiumRedemptionEmitter(comm.premiumRedemptions[redemptionId]); } catch {}
+  } else if (shouldReward && alreadyRewarded) {
+    /* The grant is already committed; only the mirror needs reconciling. */
+    ref.referralRewarded = Math.max(Number(ref.referralRewarded) || 0, awarded);
   }
+  /* The mirror always follows the committed receipts, so a restart can never
+     re-pay a threshold that was already granted. */
+  const awardedNow = Object.values(comm.premiumRedemptions)
+    .filter((row) => row && row.kind === 'referral' && row.user === owner).length;
+  ref.referralRewarded = Math.max(Number(ref.referralRewarded) || 0, awardedNow);
+
+  if (!saveUsers()) {
+    /* The premium receipt is authoritative. If the account mirror could not be
+       written, the referral is not acknowledged so it can be retried. */
+    ref.referralCount = previousCount;
+    delete me.referredBy;
+    if (shouldReward && !alreadyRewarded) {
+      process.stderr.write('[auth] referral account save failed after premium grant\n');
+    }
+    return res.status(503).json({ error: 'The referral could not be saved. Please try again.' });
+  }
+
   res.json({ ok: true, ...referralInfo(u.username) });
 });
 
@@ -865,7 +931,13 @@ router.get("/admin/api/premium-requests", requireAdmin, function (_req, res) {
 });
 router.get("/admin/api/redemptions", requireAdmin, function (_req, res) {
   const legacy = readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []);
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] redemption feed read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The redemption store is unavailable." });
+  }
   const gifts = listGiftRedemptions(comm);
   const committed = listPremiumRedemptions(comm);
   const merged = [];
@@ -873,10 +945,12 @@ router.get("/admin/api/redemptions", requireAdmin, function (_req, res) {
   for (const row of [...committed, ...gifts, ...(Array.isArray(legacy) ? legacy : [])]) {
     if (!row || !row.user) continue;
     const code = String(row.code || '');
+    /* Legacy gift rows have no id, so the source identity includes the
+       timestamp: two gifts from the same sender stay two separate rows. */
     const key = row.id
       ? `id:${row.id}`
       : code.startsWith('gift:')
-        ? `${code}|${row.user}`
+        ? `${code}|${row.user}|${row.at || row.redeemedAt || 0}`
         : `${code || row.kind || ''}|${row.user}|${row.at || 0}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -896,8 +970,13 @@ router.post("/admin/api/premium-request/decide", requireAdmin, function (req, re
   entry.decidedAt = Date.now();
   fs.writeFileSync(path.join(DATA_DIR, "premium-requests.json"), JSON.stringify(reqs, null, 2));
   if (decision === "approved") {
-    const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-    comm.profiles = comm.profiles || {};
+    let comm;
+    try {
+      comm = readCommunityStrict();
+    } catch (error) {
+      process.stderr.write(`[auth] premium approval read failed: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: "The premium store is unavailable." });
+    }
     const prof = comm.profiles[user] || {};
     if (lifetime) {
       prof.premium = true;
@@ -911,7 +990,12 @@ router.post("/admin/api/premium-request/decide", requireAdmin, function (req, re
       prof.premiumSource = "admin-approved";
     }
     comm.profiles[user] = prof;
-    fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+    try {
+      atomicWriteJSON(COMM_FILE, comm);
+    } catch (error) {
+      process.stderr.write(`[auth] premium approval save failed: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: "The premium grant could not be saved." });
+    }
   }
   res.json({ ok: true, decision: decision, lifetime: lifetime });
 });
@@ -922,8 +1006,13 @@ router.post("/admin/api/premium-grant", requireAdmin, function (req, res) {
   if (!user) return res.status(400).json({ error: "Username required" });
   if (!users[user]) return res.status(404).json({ error: "No account named '" + user + "' — they must sign up first" });
   const lifetime = req.body.days === "lifetime" || req.body.lifetime === true;
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-  comm.profiles = comm.profiles || {};
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] premium grant read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The premium store is unavailable." });
+  }
   const prof = comm.profiles[user] || {};
   if (lifetime) {
     prof.premium = true;
@@ -937,7 +1026,12 @@ router.post("/admin/api/premium-grant", requireAdmin, function (req, res) {
     prof.premiumSource = "admin-grant";
   }
   comm.profiles[user] = prof;
-  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  try {
+    atomicWriteJSON(COMM_FILE, comm);
+  } catch (error) {
+    process.stderr.write(`[auth] premium grant save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The premium grant could not be saved." });
+  }
   const log = readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []);
   log.unshift({ user: user, code: lifetime ? "admin-lifetime" : "admin-grant:" + d + "d", days: lifetime ? 0 : d, at: Date.now(), status: "active", until: prof.premiumUntil || null });
   fs.writeFileSync(path.join(DATA_DIR, "redemptions.json"), JSON.stringify(log.slice(0, 200), null, 2));
@@ -945,7 +1039,13 @@ router.post("/admin/api/premium-grant", requireAdmin, function (req, res) {
 });
 
 router.get("/admin/api/premium-active", requireAdmin, function (_req, res) {
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] premium list read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The premium store is unavailable." });
+  }
   const out = [];
   for (const name in (comm.profiles || {})) {
     const p = comm.profiles[name];
@@ -956,11 +1056,22 @@ router.get("/admin/api/premium-active", requireAdmin, function (_req, res) {
   res.json(out);
 });
 router.post("/admin/api/premium-revoke", requireAdmin, function (req, res) {
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] premium revoke read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The premium store is unavailable." });
+  }
   const prof = (comm.profiles || {})[String(req.body.user || "")];
   if (!prof) return res.status(404).json({ error: "No such profile" });
   prof.premium = false; prof.premiumUntil = null; prof.premiumSource = null;
-  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  try {
+    atomicWriteJSON(COMM_FILE, comm);
+  } catch (error) {
+    process.stderr.write(`[auth] premium revoke save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The premium revoke could not be saved." });
+  }
   res.json({ ok: true });
 });
 const DISCORD_APP_FILE = path.join(DATA_DIR, 'discord-app.json');
@@ -1004,7 +1115,14 @@ function requireAdmin(req, res, next) {
 }
 
 router.get('/admin/api/users', requireAdmin, (req, res) => {
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} }).profiles || {};
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] admin users read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The community store is unavailable.' });
+  }
+  const profiles = comm.profiles || {};
   const activity = readJsonSafe(ACTIVITY_FILE, []);
   const listens = readJsonSafe(LISTEN_FILE, {});
   const lib = readJsonSafe(LIB_FILE, { history: [] });
@@ -1124,7 +1242,13 @@ router.post('/admin/api/password', requireAdmin, (req, res) => {
 /* online now: from live sessions seen in the last 5 minutes */
 router.get('/admin/api/online', requireAdmin, (_req, res) => {
   const now = Date.now();
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] online read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The community store is unavailable.' });
+  }
   const online = [];
   for (const [tok, s] of Object.entries(sessions)) {
     if (now - s.lastSeen < 5 * 60 * 1000) {
@@ -1284,10 +1408,21 @@ router.get('/admin/api/access', requireAdmin, (req, res) => {
 
 router.post('/admin/api/verified', requireAdmin, (req, res) => {
   const name = String(req.body.username || '');
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] verified read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The community store is unavailable.' });
+  }
   if (!comm.profiles[name]) return res.status(404).json({ error: 'No profile for that user' });
   comm.profiles[name].verified = !!req.body.on;
-  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  try {
+    atomicWriteJSON(COMM_FILE, comm);
+  } catch (error) {
+    process.stderr.write(`[auth] verified save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The change could not be saved.' });
+  }
   res.json({ ok: true, verified: !!req.body.on });
 });
 router.post('/admin/api/badge', requireAdmin, (req, res) => {
@@ -1295,14 +1430,25 @@ router.post('/admin/api/badge', requireAdmin, (req, res) => {
   const badge = String(req.body.badge || '');
   const allowed = ['early', 'listener', 'superlistener', 'helper', 'premium', 'verified'];
   if (!allowed.includes(badge)) return res.status(400).json({ error: 'unknown badge' });
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] badge read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The community store is unavailable.' });
+  }
   if (!comm.profiles[name]) return res.status(404).json({ error: 'No profile for that user' });
   const p = comm.profiles[name];
-  p.badges = p.badges || [];
+  p.badges = Array.isArray(p.badges) ? p.badges : [];
   const i = p.badges.indexOf(badge);
   if (req.body.remove) { if (i >= 0) p.badges.splice(i, 1); }
   else if (i < 0) p.badges.push(badge);
-  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  try {
+    atomicWriteJSON(COMM_FILE, comm);
+  } catch (error) {
+    process.stderr.write(`[auth] badge save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The change could not be saved.' });
+  }
   res.json({ ok: true, badges: p.badges });
 });
 

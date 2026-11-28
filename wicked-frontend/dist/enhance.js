@@ -848,17 +848,32 @@
          reward still claims through OUR Discord invite, not the old one.
          The authoritative reward list decides what is automatic, so the
          decision never depends on the wording of a label. ---- */
-  let wpInvite = null;
-  fetch('/api/config/discord-invite').then((r) => r.json()).then((d) => { if (d.invite) wpInvite = d.invite; }).catch(() => {});
+  var wpInvite = null;
+  function wpLoadInvite() {
+    return fetch('/api/config/discord-invite', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (d && d.invite) {
+          wpInvite = d.invite;
+          /* The compiled bundle only opens the invite this app configured. */
+          window.__wpDiscordInvite = wpInvite;
+        }
+      })
+      .catch(function () {});
+  }
+  wpLoadInvite();
   var wpRewards = {};
+  var wpRewardsLoaded = false;
   function wpRefreshRewards() {
     return fetch('/api/rewards', { credentials: 'include' })
       .then(function (r) { return r.ok ? r.json() : []; })
       .then(function (list) {
-        (Array.isArray(list) ? list : []).forEach(function (row) {
+        var rows = Array.isArray(list) ? list : [];
+        rows.forEach(function (row) {
           if (row && row.code) wpRewards[row.code] = row;
         });
-        return list;
+        wpRewardsLoaded = true;
+        return rows;
       })
       .catch(function () { return []; });
   }
@@ -873,15 +888,19 @@
     var record = code ? wpRewards[code] : null;
     return { code: code, record: record || null };
   }
+  /* The committed reward record is the only proof that a reward was redeemed
+     automatically. The label wording is only consulted while the authoritative
+     list has not been loaded yet. */
   function wpIsAutomaticReward(row) {
     if (!row) return false;
-    if (row.dataset && row.dataset.wpAuto === '1') return true;
     var info = wpRewardRecord(row);
     var record = info.record;
     if (record) {
       if (record.autoRedeemed === true) return true;
       if (record.status === 'redeemed' && (record.type === 'premium' || record.type === 'jackpot')) return true;
+      return false;
     }
+    if (wpRewardsLoaded) return false;
     return /redeemed automatically/i.test((row.innerText || row.textContent || ''));
   }
   function wpMarkRewardRows() {
@@ -889,24 +908,37 @@
       var rows = document.querySelectorAll('.reward-row');
       for (var i = 0; i < rows.length; i++) {
         var row = rows[i];
-        if (row.dataset && row.dataset.wpMarked === '1') continue;
         var info = wpRewardRecord(row);
         if (!info.code) continue;
-        row.dataset.wpMarked = '1';
         var record = info.record;
+        /* A row is only marked once its authoritative record exists, so a row
+           rendered before the first refresh is picked up later instead of
+           staying stuck on the label fallback. */
+        if (!record) {
+          if (!wpRewardsLoaded && /redeemed automatically/i.test((row.innerText || row.textContent || ''))) {
+            row.dataset.wpAuto = '1';
+          }
+          continue;
+        }
+        row.dataset.wpMarked = '1';
         var automatic = wpIsAutomaticReward(row);
         if (automatic) row.dataset.wpAuto = '1';
-        if (!record) continue;
+        else delete row.dataset.wpAuto;
         var infoBox = row.querySelector('.r-info');
-        if (!infoBox || infoBox.querySelector('.wp-auto-note')) continue;
+        if (!infoBox) continue;
+        var existing = infoBox.querySelector('.wp-auto-note');
+        var stamp = Number(record.redeemedAt || record.at || 0);
+        var noteText = record.autoRedeemed
+          ? 'Redeemed automatically - ' + (record.redeemedBy || record.user || 'you') + ' - ' + (stamp ? new Date(stamp).toLocaleString() : 'just now')
+          : 'Claimed - ' + (record.redeemedBy || record.user || 'you') + ' - ' + (stamp ? new Date(stamp).toLocaleString() : 'just now');
+        if (existing) {
+          if (existing.textContent !== noteText) existing.textContent = noteText;
+          continue;
+        }
         var note = document.createElement('div');
         note.className = 'wp-auto-note';
         note.style.cssText = 'font-size:11px;margin-top:4px;color:#34d399';
-        var when = Number(record.redeemedAt || record.at || 0);
-        var stamp = when ? new Date(when).toLocaleString() : 'just now';
-        note.textContent = record.autoRedeemed
-          ? 'Redeemed automatically - ' + (record.redeemedBy || record.user || 'you') + ' - ' + stamp
-          : 'Claimed - ' + (record.redeemedBy || record.user || 'you') + ' - ' + stamp;
+        note.textContent = noteText;
         infoBox.appendChild(note);
       }
     } catch (e) {}
@@ -931,17 +963,28 @@
     const row = btn.closest('.reward-row');
     const card = row || btn.parentElement || btn;
     const cardText = card ? (card.innerText || card.textContent || '') : '';
+    /* The click is always intercepted here: the compiled bundle opens a
+       hardcoded invite as its fallback, and that link is not ours. */
+    e.preventDefault();
+    e.stopImmediatePropagation();
     if (wpIsAutomaticReward(row || card)) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
       wpNotify('This Premium reward was redeemed automatically and is already active.');
       return;
     }
     const codeMatch = cardText.match(/WK-[A-Z2-9]{6}/i);
     if (codeMatch) { try { navigator.clipboard.writeText(codeMatch[0].toUpperCase()); } catch {} }
-    if (!wpInvite) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
+    if (!wpInvite) {
+      /* The configured invite is unknown: try once more before giving up. */
+      wpLoadInvite().then(function () {
+        if (wpInvite) {
+          window.open(wpInvite, '_blank');
+          wpNotify('Code copied - paste it in the Discord claims channel');
+        } else {
+          wpNotify('Code copied - the Discord claims channel is unavailable right now.');
+        }
+      });
+      return;
+    }
     window.open(wpInvite, '_blank');
     wpNotify('Code copied - paste it in the Discord claims channel');
   }, true);

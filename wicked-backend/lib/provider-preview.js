@@ -34,28 +34,53 @@ async function resolveProviderPreview(query, options = {}) {
   if (typeof getJson !== 'function') throw new TypeError('getJson must be a function');
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
   const timeoutMs = Math.max(250, Math.min(6000, Number(options.timeoutMs) || 2500));
+  const term = String(query || '').trim();
 
-  const [deezer, itunes] = await Promise.allSettled([
-    getJson('deezer', { q: String(query || '').trim(), limit }, timeoutMs),
-    getJson('itunes', { term: String(query || '').trim(), media: 'music', entity: 'song', limit }, timeoutMs),
-  ]);
+  const sources = [
+    { name: 'deezer', params: { q: term, limit }, toCandidates: deezerCandidates },
+    { name: 'itunes', params: { term, media: 'music', entity: 'song', limit }, toCandidates: itunesCandidates },
+  ];
 
-  const candidates = [];
-  if (deezer.status === 'fulfilled') candidates.push(...deezerCandidates(deezer.value));
-  if (itunes.status === 'fulfilled') candidates.push(...itunesCandidates(itunes.value));
+  const attempts = sources.map(async (source) => {
+    const payload = await getJson(source.name, source.params, timeoutMs);
+    const best = pickBestMatchingTrack(source.toCandidates(payload), term);
+    if (!best) return null;
+    const audioUrl = safePreviewUrl(best.previewUrl);
+    if (!audioUrl) return null;
+    return {
+      title: best.name || '',
+      duration: Number(best.duration) || 30,
+      audio_url: audioUrl,
+      source: best.source || 'provider-preview',
+      preview: true,
+    };
+  });
 
-  const best = pickBestMatchingTrack(candidates, query);
-  if (!best) return null;
-  const audioUrl = safePreviewUrl(best.previewUrl);
-  if (!audioUrl) return null;
-
-  return {
-    title: best.name || '',
-    duration: Number(best.duration) || 30,
-    audio_url: audioUrl,
-    source: best.source || 'provider-preview',
-    preview: true,
-  };
+  /* The first provider with a valid match wins. Waiting for the slower
+     provider as well would add its latency to every cold start, so a failed
+     or non-matching provider simply does not win the race. */
+  return new Promise((resolve) => {
+    let pending = attempts.length;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    for (const attempt of attempts) {
+      Promise.resolve(attempt).then((value) => {
+        if (value) {
+          finish(value);
+          return;
+        }
+        pending -= 1;
+        if (pending === 0) finish(null);
+      }, () => {
+        pending -= 1;
+        if (pending === 0) finish(null);
+      });
+    }
+  });
 }
 
 /* Return the first usable response without cancelling the other work. A

@@ -162,16 +162,61 @@ function badgesFor(name, p) {
   return out.slice(0, 8);
 }
 
-function load() {
-  try {
-    return JSON.parse(fs.readFileSync(COMM_FILE, 'utf8'));
-  } catch {
-    return { profiles: {}, chat: { general: [] } };
+/* The community document holds the premium profiles and the redemption
+   receipts, so a failed read must never be turned into an empty document:
+   writing that fallback would erase every profile and redemption history.
+   A broken document raises instead, and the routes answer 503. */
+class CommunityStoreError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'CommunityStoreError';
+    this.status = 503;
   }
 }
+let lastLoadOk = true;
+function load() {
+  let raw;
+  try {
+    raw = fs.readFileSync(COMM_FILE, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') { lastLoadOk = true; return { profiles: {}, chat: { general: [] } }; }
+    lastLoadOk = false;
+    throw new CommunityStoreError(`The community store could not be read: ${error && error.message || error}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    lastLoadOk = false;
+    throw new CommunityStoreError(`The community store is not valid JSON: ${error && error.message || error}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    lastLoadOk = false;
+    throw new CommunityStoreError('The community store has an invalid shape.');
+  }
+  if (parsed.profiles !== undefined && parsed.profiles !== null
+    && (typeof parsed.profiles !== 'object' || Array.isArray(parsed.profiles))) {
+    lastLoadOk = false;
+    throw new CommunityStoreError('The community store has an invalid profile map.');
+  }
+  lastLoadOk = true;
+  return parsed;
+}
 function save(d) {
-  try { atomicWriteJSON(COMM_FILE, d); }
-  catch (e) { process.stderr.write(`[community] profile save failed: ${e && e.message || e}\n`); }
+  /* While the store cannot be read, nothing is written: the broken document
+     stays on disk so it can be repaired instead of being overwritten. */
+  if (!lastLoadOk) {
+    process.stderr.write('[community] refusing to write while the store is unreadable\n');
+    return false;
+  }
+  if (!d || typeof d !== 'object' || Array.isArray(d)
+    || (d.profiles !== undefined && d.profiles !== null
+      && (typeof d.profiles !== 'object' || Array.isArray(d.profiles)))) {
+    process.stderr.write('[community] refusing to write an invalid community document\n');
+    return false;
+  }
+  try { atomicWriteJSON(COMM_FILE, d); return true; }
+  catch (e) { process.stderr.write(`[community] profile save failed: ${e && e.message || e}\n`); return false; }
 }
 
 function dmKey(a, b) {
@@ -704,9 +749,26 @@ router.post('/api/auth', (req, res) => {
   save(d);
   res.json({ ok: true, token: tok, name, premium: premiumNow(p) });
 });
+/* A corrupt community document is reported as unavailable instead of being
+   replaced by an empty store. */
+router.use((error, _req, res, next) => {
+  if (error instanceof CommunityStoreError) {
+    process.stderr.write(`[community] store unavailable: ${error.message}\n`);
+    return res.status(503).json({ error: 'Community data is unavailable right now.' });
+  }
+  return next(error);
+});
 /* ---------- Socket layer ---------- */
 function attach(io) {
-  const d = load();
+  let d;
+  try {
+    d = load();
+  } catch (error) {
+    /* The socket layer still starts so the admin can reach the panel, but no
+       write happens while the store is unreadable. */
+    process.stderr.write(`[community] socket layer started without a readable store: ${error && error.message || error}\n`);
+    d = { profiles: {} };
+  }
   const online = new Map(); // socket.id -> profile snapshot
   const rooms = new Map();  // room -> { host, members:Set<sid>, track, playing, epoch, position }
 

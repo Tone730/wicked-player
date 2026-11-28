@@ -52,15 +52,59 @@ test('only premium and jackpot rewards are redeemed automatically', () => {
 test('the admin claim endpoint trusts committed receipts, not the reward type', () => {
   const route = section(serverSource, "app.post('/api/admin/reward/claim'", 'RECOMMEND (Auto-DJ)');
   assert.match(route, /receipts\[rw\.redemptionId\]/);
-  assert.match(route, /alreadyRedeemed = Boolean\(rw\.autoRedeemed \|\| receipt\)/);
+  assert.match(route, /alreadyRedeemed = Boolean\(receipt\)/);
+  assert.doesNotMatch(route, /rw\.autoRedeemed \|\| receipt/);
   assert.doesNotMatch(route, /rw\.type === 'premium'/);
 });
 
-test('authoritative stores are read with the strict reader', () => {
+test('an automatic reward without a receipt is retried instead of being stranded', () => {
+  const route = section(serverSource, "app.post('/api/admin/reward/claim'", 'RECOMMEND (Auto-DJ)');
+  assert.match(route, /if \(rw\.redemptionId && !receipt\)/);
+  assert.match(route, /commitPremiumReward\(d, rw, req/);
+  assert.match(route, /REWARD_NOT_REDEEMED/);
+  /* A failed retry must leave the reward retryable, never claimed. */
+  assert.ok(route.indexOf("rw.status = 'failed'") < route.indexOf('res.json({ ok: true, alreadyRedeemed: true, reward: rw })'));
+});
+
+test('a delayed reward retry grants the full duration from the commit time', () => {
+  const helper = section(serverSource, 'function commitPremiumReward(', 'const REWARD_TYPES = [');
+  assert.doesNotMatch(helper, /now: Number\(rw\.at\)/);
+  assert.match(helper, /\n\s+now,\n/);
+});
+
+test('the gift route requires an idempotency key', () => {
+  const route = section(authSource, "router.post('/api/premium/gift'", '/* Both sides can verify');
+  assert.match(route, /if \(!requestId \|\| !\/\^\[A-Za-z0-9_-\]\{8,64\}\$\/\.test\(requestId\)\)/);
+  assert.match(route, /INVALID_REQUEST_ID/);
+});
+
+test('referral rewards use the committed receipt as the idempotency key', () => {
+  const route = section(authSource, "router.post('/api/referrals/apply'", '/* premium request:');
+  assert.match(route, /const redemptionId = `referral:\$\{owner\}:\$\{count\}`/);
+  assert.match(route, /comm\.premiumRedemptions\[redemptionId\]/);
+  assert.match(route, /if \(!saveUsers\(\)\)/);
+  assert.match(route, /readCommunityStrict\(\)/);
+  /* A failed community write rolls the referral back instead of acknowledging it. */
+  assert.match(route, /ref\.referralCount = previousCount/);
+});
+
+test('community writers never fall back to an empty document', () => {
+  assert.doesNotMatch(authSource, /readJsonSafe\(COMM_FILE/);
+  assert.doesNotMatch(authSource, /fs\.writeFileSync\(COMM_FILE/);
+  const communitySource = fs.readFileSync(path.join(__dirname, '..', 'community.js'), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(communitySource, /class CommunityStoreError/);
+  assert.match(communitySource, /refusing to write while the store is unreadable/);
+  assert.match(communitySource, /router\.use\(\(error, _req, res, next\) => \{/);
+  assert.match(communitySource, /status\(503\)/);
+});
+
+test('authoritative stores are read with the schema-checked readers', () => {
   assert.match(authSource, /readCommunityStrict/);
-  assert.match(authSource, /readJSONStrict\(CODES_FILE/);
-  assert.match(serverSource, /readJSONStrict\(rewardsFile/);
-  assert.match(serverSource, /readJSONStrict\(communityFile/);
+  assert.match(authSource, /readCodesStore\(CODES_FILE/);
+  assert.match(authSource, /readRewardsStore\(/);
+  assert.match(serverSource, /readRewardsStore\(rewardsFile\)/);
+  assert.match(serverSource, /readCommunityStore\(communityFile\)/);
+  assert.match(serverSource, /readCodesStore\(codesFile\)/);
 });
 
 test('the admin feed includes committed premium receipts and legacy history', () => {

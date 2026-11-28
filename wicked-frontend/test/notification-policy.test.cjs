@@ -83,10 +83,10 @@ test('the release publisher packages the authoritative compiled frontend', () =>
   assert.doesNotMatch(releaseScript, /npm run build/);
   assert.match(releaseScript, /verifying frontend distribution/);
   assert.match(releaseScript, /index-2kADS7Vh-p4\.js/);
-  assert.ok(releaseScript.includes('enhance\\.js\\?ov=18'));
+  assert.ok(releaseScript.includes('enhance\\.js\\?ov=19'));
   assert.ok(releaseScript.includes('notification-policy\\.js\\?ov=1'));
   assert.ok(releaseScript.includes('playback-policy\\.js\\?ov=2'));
-  assert.ok(releaseScript.includes('index-2kADS7Vh-p4\\.js\\?v=3514'));
+  assert.ok(releaseScript.includes('index-2kADS7Vh-p4\\.js\\?v=3515'));
   assert.match(releaseScript, /node make-latest\.js/);
   assert.match(releaseScript, /Wicked-Player-Setup-\$V\.exe/);
   assert.match(makeLatest, /Wicked-Player-Setup-\$\{pkg\.version\}\.exe/);

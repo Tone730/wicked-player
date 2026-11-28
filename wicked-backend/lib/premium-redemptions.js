@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { grantPremiumDays } = require('./premium-gifts');
+const { PremiumStoreError, isPlainObject, normalizeCommunityState } = require('./premium-store');
 
 class PremiumRedemptionError extends Error {
   constructor(status, code, message) {
@@ -12,16 +13,12 @@ class PremiumRedemptionError extends Error {
   }
 }
 
+/* A structurally broken community document (for example "profiles": []) is a
+   corrupt store, not an empty one. Normalizing it would silently drop the
+   grant that a caller is about to report as successful, so the shape is
+   validated and the request fails closed instead. */
 function ensureCommunity(community) {
-  const state = community && typeof community === 'object' ? community : {};
-  state.profiles = state.profiles && typeof state.profiles === 'object' ? state.profiles : {};
-  state.premiumRedemptions = state.premiumRedemptions && typeof state.premiumRedemptions === 'object'
-    ? state.premiumRedemptions
-    : {};
-  state.premiumCodeRedemptions = state.premiumCodeRedemptions && typeof state.premiumCodeRedemptions === 'object'
-    ? state.premiumCodeRedemptions
-    : {};
-  return state;
+  return normalizeCommunityState(community);
 }
 
 function normalizeCode(value) {
@@ -37,16 +34,33 @@ function validateCodeShape(code) {
   }
 }
 
-function durationFor(entry, fallback = 30, hint = null) {
+/* Resolve how many days a code is worth. The order matters: explicit metadata
+   wins, then the reward that issued the code, then the legacy convention for
+   a plain code. A code whose duration cannot be established fails closed
+   instead of silently granting 30 days. */
+function durationFor(entry, hint = null) {
   const days = Number(entry && entry.days);
   if (days === 7 || days === 30) return days;
   if (entry && entry.type === 'jackpot') return 7;
+  if (entry && entry.type === 'premium') return 30;
   /* Legacy reward codes were stored without their duration. The reward that
      issued the code still knows whether it was a 7-day jackpot. */
-  const hinted = Number(hint && hint.days);
-  if (hinted === 7 || hinted === 30) return hinted;
-  if (hint && hint.type === 'jackpot') return 7;
-  return fallback;
+  if (hint) {
+    const hinted = Number(hint.days);
+    if (hinted === 7 || hinted === 30) return hinted;
+    if (hint.type === 'jackpot') return 7;
+    return 30;
+  }
+  /* A plain legacy code (stored as true) has always meant 30 days. */
+  if (entry === true) return 30;
+  if (isPlainObject(entry)) {
+    throw new PremiumRedemptionError(
+      503,
+      'CODE_METADATA_UNKNOWN',
+      'This code cannot be redeemed right now. Please try again later.',
+    );
+  }
+  return 30;
 }
 
 function commitRedemption(community, redemption, code) {
@@ -72,7 +86,10 @@ function commitRedemption(community, redemption, code) {
    granting premium twice. */
 function redeemPremiumCode(options = {}) {
   const community = ensureCommunity(options.community);
-  const codes = options.codes && typeof options.codes === 'object' ? options.codes : {};
+  if (options.codes !== undefined && options.codes !== null && !isPlainObject(options.codes)) {
+    throw new PremiumStoreError('The code store has an invalid shape.');
+  }
+  const codes = options.codes || {};
   const user = String(options.user || '').trim();
   const code = normalizeCode(options.code);
   const now = Number(options.now) || Date.now();
@@ -95,7 +112,7 @@ function redeemPremiumCode(options = {}) {
     throw new PremiumRedemptionError(409, 'CODE_USED', 'That code was already used');
   }
 
-  const days = durationFor(entry, 30, (options.hints && options.hints[code]) || null);
+  const days = durationFor(entry, (options.hints && options.hints[code]) || null);
   const granted = grantPremiumDays(community.profiles, user, days, `code:${code}`, now);
   const redemption = commitRedemption(community, {
     id,
@@ -141,7 +158,7 @@ function redeemPremiumReward(options = {}) {
     throw new PremiumRedemptionError(409, 'REWARD_USED', 'This premium reward was already redeemed');
   }
 
-  const days = durationFor({ type }, 30);
+  const days = durationFor({ type }, null);
   const granted = grantPremiumDays(community.profiles, user, days, `reward:${rewardCode}`, now);
   const redemption = commitRedemption(community, {
     id,

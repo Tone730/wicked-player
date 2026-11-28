@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { normalizeCommunityState } = require('./premium-store');
 
 const GIFT_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -52,18 +53,12 @@ function grantPremiumDays(profiles, name, days, source, now = Date.now()) {
    idempotent: retrying the same request returns the original receipt instead
    of granting premium twice. */
 function redeemPremiumGift(options = {}) {
-  const community = options.community && typeof options.community === 'object'
+  /* A broken community document is a corrupt store, not an empty one: the gift
+     grant and its receipts would be dropped while the request still reports
+     success. The shape is validated so the route can fail closed. */
+  const community = normalizeCommunityState(options.community && options.community
     ? options.community
-    : { profiles: options.profiles && typeof options.profiles === 'object' ? options.profiles : {} };
-  community.profiles = community.profiles && typeof community.profiles === 'object'
-    ? community.profiles
-    : {};
-  community.premiumRedemptions = community.premiumRedemptions && typeof community.premiumRedemptions === 'object'
-    ? community.premiumRedemptions
-    : {};
-  community.giftRequests = community.giftRequests && typeof community.giftRequests === 'object'
-    ? community.giftRequests
-    : {};
+    : { profiles: options.profiles || {} });
   const profiles = community.profiles;
   const users = options.users && typeof options.users === 'object' ? options.users : {};
   const sender = String(options.sender || '').trim();

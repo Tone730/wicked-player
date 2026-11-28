@@ -4,9 +4,9 @@ Ad-free music player with effects, lyrics, overlays, community profiles and Disc
 
 ## Download / Update
 
-**Latest release (v3.5.14):** https://github.com/Tone730/wicked-player/releases/latest
+**Latest release (v3.5.15):** https://github.com/Tone730/wicked-player/releases/latest
 
-Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.14.exe
+Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.15.exe
 
 Install once and the app auto-updates from GitHub (`latest.yml`). Existing installs from 3.5.0 onward pick up new releases automatically.
 
@@ -24,8 +24,14 @@ Install once and the app auto-updates from GitHub (`latest.yml`). Existing insta
 
 ![Wicked Player Discord presence settings](docs/screenshots/04-presence.png)
 
-## What's in v3.5.14
+## What's in v3.5.15
 
+- **Schema-checked Premium stores** — a structurally broken community, reward, or code document is rejected instead of being read as an empty store, so a redemption can never report success for a grant that was dropped.
+- **Fail-closed Premium writes** — every Premium, profile, and community writer uses one strict reader and an atomic write, so a corrupt document is never overwritten with an empty one.
+- **Reward retries grant the full duration** — a delayed retry starts the entitlement when the grant commits, and an admin claim retries an automatic reward that never received Premium instead of stranding it.
+- **Idempotent referral rewards** — referral Premium is keyed by its committed receipt, so a restart can never pay the same threshold twice.
+- **Required gift idempotency key** — every gift carries a request id, so a retry returns the original receipt instead of granting Premium twice.
+- **First usable preview** — cold playback uses the first provider preview that passes the strict title-and-artist match instead of waiting for the slower provider.
 - **Automatic Premium redemption** — member-to-member Premium gifts and Premium/jackpot listening rewards are redeemed immediately for the recipient.
 - **Visible redemption receipts** — senders, recipients, and admins can see who redeemed which gift or reward and when; the admin log also updates live.
 - **Faster cold-start playback** — a strict provider preview is resolved alongside yt-dlp, so playback can begin in a fraction of a second while the complete stream continues resolving in the background.
