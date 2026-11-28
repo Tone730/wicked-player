@@ -277,7 +277,11 @@ app.get('/import/youtube', async (req, res) => {
     return res.status(400).json({ error: 'Paste a YouTube video link' });
   }
   try {
-    const info = await ytdlp(url, { dumpSingleJson: true, noWarnings: true, ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}) });
+    const info = await runYtDlpExclusive(
+      url,
+      ytdlpFlags({ dumpSingleJson: true }),
+      ytdlpOptions(20000),
+    );
     const audioFormats = (info.formats || []).filter(
       (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
     );
@@ -970,6 +974,28 @@ app.get('/lyrics', async (req, res) => {
    AUDIO RESOLVER: YouTube via bundled yt-dlp (free, full songs)
 ============================================================ */
 const ytdlp = require('youtube-dl-exec');
+const {
+  createBackgroundJobRegistry,
+  createClientJobRegistry,
+  createClientPendingRegistry,
+  createPrioritySerialQueue,
+  createResolverJob,
+  describeResolverError,
+  isResolverBotChallenge,
+  isRetryableResolverError,
+} = require('./lib/stream-resolver');
+
+/* yt-dlp child processes interfere with one another on this VPS. Running
+   searches/extractions in parallel makes every job hit its deadline, while a
+   serial queue resolves the same track reliably. Foreground selections take
+   priority over background cache warm-ups. */
+const STREAM_RESOLVER_QUEUE_MAX = Math.max(10, Math.min(500,
+  Number(process.env.STREAM_RESOLVER_QUEUE_MAX) || 100));
+const STREAM_RESOLVER_QUEUE_WAIT_MS = Math.max(5000, Math.min(120000,
+  Number(process.env.STREAM_RESOLVER_QUEUE_WAIT_MS) || 45000));
+const ytDlpQueue = createPrioritySerialQueue({ maxPending: STREAM_RESOLVER_QUEUE_MAX });
+const STREAM_RESOLVER_FOREGROUND_PRIORITY = 10;
+const STREAM_RESOLVER_BACKGROUND_PRIORITY = 0;
 
 /* ---------- stream resolution cache (instant replay + search warm-up) ----------
    yt-dlp takes ~10s per lookup. Cache the resolved audio URL in memory and on
@@ -981,8 +1007,13 @@ const STREAM_CACHE_TTL = Math.max(30, Math.min(720, Number(process.env.STREAM_CA
 const STREAM_CACHE_MAX = Math.max(50, Math.min(10000, Number(process.env.STREAM_CACHE_MAX) || 2000));
 const STREAM_WARM_MAX = Math.max(4, Math.min(200, Number(process.env.STREAM_WARM_MAX) || 40));
 const streamCache = new Map();
-const streamPending = new Map();
-const streamStats = { hits: 0, misses: 0, dedupes: 0, warmed: 0, fallbacks: 0, evictions: 0, previews: 0 };
+const streamPending = createClientPendingRegistry();
+const backgroundPending = createClientPendingRegistry();
+const BACKGROUND_PENDING_SCOPE = 'background';
+const streamStats = { hits: 0, misses: 0, dedupes: 0, warmed: 0, fallbacks: 0, evictions: 0, previews: 0, retriesSuppressed: 0 };
+const STREAM_RETRY_COOLDOWN_MS = Math.max(0, Math.min(60000,
+  Number(process.env.STREAM_RETRY_COOLDOWN_MS) || 10000));
+const streamRetryAt = new Map();
 const streamFallback = require('./stream-fallback');
 try {
   const saved = JSON.parse(fs.readFileSync(STREAM_CACHE_FILE, 'utf8'));
@@ -1000,6 +1031,9 @@ function pruneStreamCache(force) {
       streamCache.delete(k);
       changed = true;
     }
+  }
+  for (const [k, expiresAt] of streamRetryAt) {
+    if (expiresAt <= now) streamRetryAt.delete(k);
   }
   if (changed) streamCacheDirty = true;
   if (force && changed) persistStreamCache();
@@ -1030,7 +1064,6 @@ function streamExpiry(data) {
   if (Number.isFinite(urlExp)) exp = Math.min(exp, urlExp - 120000);
   return exp;
 }
-const RETRYABLE_STREAM_ERROR = /sign in to confirm|bot|403|429|temporarily unavailable|requested format is not available|unable to extract|timeout|timed out|connection reset|http error 5\d\d/i;
 const STREAM_RESOLVE_TIMEOUT_MS = Math.max(5000, Math.min(30000,
   Number(process.env.STREAM_RESOLVE_TIMEOUT_MS) || 12000));
 const STREAM_SEARCH_TIMEOUT_MS = Math.max(2000, Math.min(10000,
@@ -1053,6 +1086,50 @@ function ytdlpFlags(extra = {}) {
   };
 }
 
+const backgroundYtDlpJobs = createBackgroundJobRegistry();
+const foregroundYtDlpJobs = createClientJobRegistry();
+function cancelBackgroundYtDlpJobs() {
+  return backgroundYtDlpJobs.cancelAll();
+}
+
+function cancelledResolverError() {
+  const error = new Error('Background stream resolution was cancelled');
+  error.name = 'ResolverCancelledError';
+  error.cancelled = true;
+  return error;
+}
+
+/* youtube-dl-exec's convenience function hides the child handle. Use its exec
+   method so an active background warm-up can be stopped immediately when the
+   user selects a track. */
+async function runYtDlp(url, flags, options, job) {
+  if (job && job.cancelled) throw cancelledResolverError();
+  const child = ytdlp.exec(url, flags, options);
+  if (job) job.child = child;
+  try {
+    const result = await child;
+    if (job && job.cancelled) throw cancelledResolverError();
+    const stdout = String(result && result.stdout || '').trim();
+    if (!stdout) return null;
+    if (stdout.startsWith('{')) return JSON.parse(stdout);
+    return stdout;
+  } finally {
+    if (job && job.child === child) job.child = null;
+  }
+}
+
+async function runYtDlpExclusive(url, flags, options) {
+  cancelBackgroundYtDlpJobs();
+  return ytDlpQueue.run(
+    () => runYtDlp(url, flags, options, null),
+    STREAM_RESOLVER_FOREGROUND_PRIORITY,
+    {
+      waitTimeoutMs: STREAM_RESOLVER_QUEUE_WAIT_MS,
+      maxPending: STREAM_RESOLVER_QUEUE_MAX,
+    },
+  );
+}
+
 function youtubeCandidates(entries) {
   return (entries || []).map((entry) => ({
     ...entry,
@@ -1061,7 +1138,20 @@ function youtubeCandidates(entries) {
   }));
 }
 
-async function resolveFreshStream(query) {
+function classifyResolverFailure(error, job) {
+  if (job.cancelled || error.cancelled || error.code === 'RESOLVER_JOB_CANCELLED') {
+    return { cancelled: true, botBlocked: false, retry: false };
+  }
+  const botBlocked = isResolverBotChallenge(error);
+  return {
+    cancelled: false,
+    botBlocked,
+    retry: !botBlocked && isRetryableResolverError(error),
+  };
+}
+
+async function resolveYoutubeStream(query, job = {}) {
+  if (job.cancelled) return { cancelled: true };
   /* Search flat, select a genuinely matching video, then extract only that
      video. The old ytsearch3 path extracted three complete videos and was the
      main source of 50-140 second resolutions. */
@@ -1069,20 +1159,21 @@ async function resolveFreshStream(query) {
   const searchQueries = ['ytsearch5:' + query, 'ytsearch5:' + query + ' audio'];
   const candidates = [];
   const seenVideoIds = new Set();
-  let lastErr = null;
+  let lastFailure = null;
   let botBlocked = false;
 
   for (const searchQuery of searchQueries) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      lastErr = new Error('Stream resolution deadline exceeded');
+      lastFailure = { stage: 'deadline', error: new Error('Stream resolution deadline exceeded') };
       break;
     }
+    const searchTimeoutMs = Math.min(STREAM_SEARCH_TIMEOUT_MS, remaining);
     try {
-      const result = await ytdlp(searchQuery, ytdlpFlags({
+      const result = await runYtDlp(searchQuery, ytdlpFlags({
         flatPlaylist: true,
         dumpSingleJson: true,
-      }), ytdlpOptions(Math.min(STREAM_SEARCH_TIMEOUT_MS, remaining)));
+      }), ytdlpOptions(searchTimeoutMs), job);
       const entries = (result && result.entries) || [];
       for (const candidate of youtubeCandidates(entries)) {
         const score = trackMatchScore(candidate, query);
@@ -1091,31 +1182,34 @@ async function resolveFreshStream(query) {
         candidates.push({ candidate, score });
       }
       if (candidates.length) break;
-      lastErr = new Error('No matching YouTube result found');
+      lastFailure = { stage: 'search', error: new Error('No matching YouTube result found') };
     } catch (error) {
-      lastErr = error;
-      const message = String(error && error.message || error);
-      if (/sign in to confirm|bot/i.test(message)) {
+      const action = classifyResolverFailure(error, job);
+      if (action.cancelled) return { cancelled: true };
+      lastFailure = { stage: 'search', error, timeoutMs: searchTimeoutMs };
+      if (action.botBlocked) {
         botBlocked = true;
         break;
       }
-      if (!RETRYABLE_STREAM_ERROR.test(message)) break;
+      if (!action.retry) break;
     }
   }
 
   candidates.sort((left, right) => right.score - left.score);
   for (let index = 0; index < Math.min(2, candidates.length); index++) {
+    if (job.cancelled) return { cancelled: true };
     const candidate = candidates[index].candidate;
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      lastErr = new Error('Stream resolution deadline exceeded');
+      lastFailure = { stage: 'deadline', error: new Error('Stream resolution deadline exceeded') };
       break;
     }
+    const extractTimeoutMs = Math.min(STREAM_RESOLVE_TIMEOUT_MS, remaining);
     try {
       const videoUrl = candidate.url || 'https://www.youtube.com/watch?v=' + encodeURIComponent(candidate.id);
-      const video = await ytdlp(videoUrl, ytdlpFlags({
+      const video = await runYtDlp(videoUrl, ytdlpFlags({
         dumpSingleJson: true,
-      }), ytdlpOptions(Math.min(STREAM_RESOLVE_TIMEOUT_MS, remaining)));
+      }), ytdlpOptions(extractTimeoutMs), job);
       const audioFormats = (video.formats || []).filter(
         (format) => format.acodec && format.acodec !== 'none'
           && (!format.vcodec || format.vcodec === 'none') && format.url
@@ -1123,33 +1217,82 @@ async function resolveFreshStream(query) {
       audioFormats.sort((left, right) => (right.abr || 0) - (left.abr || 0));
       const best = audioFormats[0];
       if (!best) {
-        lastErr = new Error('No audio stream found');
+        lastFailure = { stage: 'extract', error: new Error('No audio stream found') };
         continue;
       }
       return {
-        title: video.title,
-        duration: video.duration,
-        audio_url: best.url,
-        proxied_url: `/audio?u=${encodeURIComponent(best.url)}`,
-        bitrate: best.abr,
-        ext: best.ext,
-        video_id: video.id,
-        art: video.thumbnail || null,
-        source: 'youtube',
-        ...(index ? { retry: index } : {}),
+        stream: {
+          title: video.title,
+          duration: video.duration,
+          audio_url: best.url,
+          proxied_url: `/audio?u=${encodeURIComponent(best.url)}`,
+          bitrate: best.abr,
+          ext: best.ext,
+          video_id: video.id,
+          art: video.thumbnail || null,
+          source: 'youtube',
+          ...(index ? { retry: index } : {}),
+        },
       };
     } catch (error) {
-      lastErr = error;
-      const message = String(error && error.message || error);
-      if (/sign in to confirm|bot/i.test(message)) {
+      const action = classifyResolverFailure(error, job);
+      if (action.cancelled) return { cancelled: true };
+      lastFailure = { stage: 'extract', error, timeoutMs: extractTimeoutMs };
+      if (action.botBlocked) {
         botBlocked = true;
         break;
       }
-      if (!RETRYABLE_STREAM_ERROR.test(message)) break;
+      if (!action.retry) break;
     }
   }
 
-  const reason = String(lastErr && lastErr.message || lastErr || 'resolve failed').slice(0, 160);
+  const failure = lastFailure || { stage: 'resolve', error: new Error('resolve failed') };
+  const reason = `${failure.stage}: ${describeResolverError(failure.error, failure.timeoutMs)}`.slice(0, 240);
+  return { error: reason, botBlocked };
+}
+
+async function resolveFreshStream(query, options = {}) {
+  const job = createResolverJob(options);
+  const foregroundRegistry = job.background ? null : foregroundYtDlpJobs.get(options.clientKey);
+  if (typeof options.jobRef === 'object') options.jobRef.current = job;
+  if (job.background) {
+    backgroundYtDlpJobs.add(job);
+  } else {
+    if (options.supersede !== false) foregroundRegistry.cancelAll();
+    foregroundRegistry.add(job);
+  }
+  let result;
+  try {
+    result = await ytDlpQueue.run(
+      () => resolveYoutubeStream(query, job),
+      options.background
+        ? STREAM_RESOLVER_BACKGROUND_PRIORITY
+        : STREAM_RESOLVER_FOREGROUND_PRIORITY,
+      {
+        signal: job.controller.signal,
+        latestFirst: !options.background,
+        waitTimeoutMs: options.background
+          ? Math.min(STREAM_RESOLVER_QUEUE_WAIT_MS, 30000)
+          : STREAM_RESOLVER_QUEUE_WAIT_MS,
+        maxPending: STREAM_RESOLVER_QUEUE_MAX,
+      },
+    );
+  } catch (error) {
+    if (job.cancelled || error.cancelled || error.code === 'RESOLVER_JOB_CANCELLED') {
+      return { cancelled: true };
+    }
+    result = { error: `resolver: ${describeResolverError(error)}`, botBlocked: false };
+  } finally {
+    if (job.background) backgroundYtDlpJobs.remove(job);
+    else {
+      foregroundRegistry.remove(job);
+      foregroundYtDlpJobs.release(options.clientKey, foregroundRegistry);
+    }
+  }
+  if (result.cancelled) return { cancelled: true };
+  if (result.stream) return result.stream;
+
+  const reason = result.error || 'resolve failed';
   console.error('Stream resolve failed after bounded attempts: ' + reason);
 
   /* Auto-healing: privacy frontends, then short previews, then peer rotation
@@ -1165,7 +1308,7 @@ async function resolveFreshStream(query) {
   }
   alerts.record('stream-failure', 'critical', 'All stream sources failed for a track', { query, reason });
   return {
-    error: botBlocked
+    error: result.botBlocked
       ? 'Stream unavailable — YouTube is blocking this track right now'
       : 'Stream unavailable right now',
     status: 502,
@@ -1183,26 +1326,85 @@ function getStream(query, options = {}) {
   if (hit) { streamCache.delete(key); streamCacheDirty = true; }
 
   const preview = options.allowPreview === false ? null : previewFor(query);
-  if (streamPending.has(key)) {
+  const pendingMap = options.background ? backgroundPending : streamPending;
+  const pendingScope = options.background
+    ? BACKGROUND_PENDING_SCOPE
+    : String(options.clientKey || 'guest');
+  const pending = pendingMap.get(key, pendingScope);
+  if (pending) {
     streamStats.dedupes++;
-    if (preview) {
+    if (preview && !options.upgrade) {
       streamStats.previews++;
       return Promise.resolve({ ...preview, cache: 'preview' });
     }
-    return streamPending.get(key);
+    /* An upgrade request joins the existing foreground resolution instead of
+       repeatedly polling its preview. The initial request still returned the
+       preview immediately; this request resolves only when full media (or a
+       terminal failure) is available. Pending work is isolated by browser
+       session so one user's newer selection cannot cancel another user's
+       request for the same track. */
+    return pending;
   }
 
-  /* A foreground click supersedes a queued warm-up for the same track. */
-  const queuedAt = warmQueue.indexOf(key);
-  if (queuedAt >= 0) warmQueue.splice(queuedAt, 1);
+  /* A failed full-resolution attempt gets a short cooldown. Preview clients
+     poll frequently; without this gate every poll would launch another yt-dlp
+     child and keep the VPS saturated long after the first failure. */
+  const retryAt = streamRetryAt.get(key) || 0;
+  if (retryAt > Date.now()) {
+    streamStats.retriesSuppressed++;
+    if (preview) {
+      return Promise.resolve({
+        ...preview,
+        cache: 'preview',
+        retryAfterMs: retryAt - Date.now(),
+      });
+    }
+    return Promise.resolve({
+      error: 'Stream temporarily unavailable right now',
+      status: 503,
+      retryAfterMs: retryAt - Date.now(),
+    });
+  }
+  if (retryAt) streamRetryAt.delete(key);
 
-  const p = resolveFreshStream(query).then((data) => {
-    if (data.error) return data;
+  /* A foreground click supersedes a queued warm-up for the same track. */
+  if (!options.background) {
+    const queuedAt = warmQueue.indexOf(key);
+    if (queuedAt >= 0) warmQueue.splice(queuedAt, 1);
+    if (options.cancelBackground !== false) cancelBackgroundYtDlpJobs();
+  }
+
+  const jobRef = {};
+  const p = resolveFreshStream(query, {
+    ...options,
+    key,
+    pendingMap,
+    pendingScope,
+    jobRef,
+  }).then((data) => {
+    if (data.cancelled) return data;
+    if (data.error) {
+      /* A failed hover/warm-up must never suppress the user's later click.
+         Only foreground failures activate the shared retry cooldown. */
+      if (!options.background) {
+        const retryAt = Date.now() + STREAM_RETRY_COOLDOWN_MS;
+        streamRetryAt.set(key, retryAt);
+        return { ...data, retryAfterMs: Math.max(0, retryAt - Date.now()) };
+      }
+      return data;
+    }
     streamStats.misses++;
     if (!isFullStream(data)) {
+      let retryAfterMs = 0;
+      if (data.fallbackReason && !options.background) {
+        const retryAt = Date.now() + STREAM_RETRY_COOLDOWN_MS;
+        streamRetryAt.set(key, retryAt);
+        retryAfterMs = Math.max(0, retryAt - Date.now());
+      }
       rememberPreview(query, data.audio_url, data.title, data.duration);
-      return { ...data, cache: 'preview' };
+      return { ...data, cache: 'preview', ...(retryAfterMs ? { retryAfterMs } : {}) };
     }
+    streamRetryAt.delete(key);
     const rec = { data, expiresAt: streamExpiry(data) };
     if (rec.expiresAt <= Date.now()) return { ...data, cache: 'miss' };
     streamCache.set(key, rec);
@@ -1216,10 +1418,25 @@ function getStream(query, options = {}) {
     }
     return { ...data, cache: 'miss' };
   }).catch((error) => {
-    console.error('Stream resolver failed:', error && error.message || error);
-    return { error: 'Stream unavailable right now', status: 502 };
-  }).finally(() => streamPending.delete(key));
-  streamPending.set(key, p);
+    console.error('Stream resolver failed:', describeResolverError(error));
+    let retryAfterMs = 0;
+    if (!options.background) {
+      const retryAt = Date.now() + STREAM_RETRY_COOLDOWN_MS;
+      streamRetryAt.set(key, retryAt);
+      retryAfterMs = Math.max(0, retryAt - Date.now());
+    }
+    return { error: 'Stream unavailable right now', status: 502, retryAfterMs };
+  }).finally(() => {
+    if (pendingMap.get(key, pendingScope) === p) {
+      pendingMap.delete(key, pendingScope, p);
+    }
+  });
+  if (jobRef.current) {
+    jobRef.current.pendingMap = pendingMap;
+    jobRef.current.pendingScope = pendingScope;
+    jobRef.current.pendingPromise = p;
+  }
+  pendingMap.set(key, pendingScope, p);
 
   /* Provider previews start playback immediately while the complete stream is
      resolved and cached in the background for the next play. */
@@ -1235,7 +1452,8 @@ function warmStream(q) {
   const key = streamKey(q);
   const hit = streamCache.get(key);
   if (!key || (hit && isFullStream(hit.data) && hit.expiresAt > Date.now()
-    && audioUrlExpiry(hit.data.audio_url) > Date.now()) || streamPending.has(key) || warmQueue.includes(key)) return;
+    && audioUrlExpiry(hit.data.audio_url) > Date.now()) || streamPending.has(key)
+    || backgroundPending.has(key) || warmQueue.includes(key)) return;
   warmQueue.push(key);
   if (warmQueue.length > STREAM_WARM_MAX) warmQueue.shift();
   if (!warming) { warming = true; setImmediate(drainWarmQueue); }
@@ -1250,8 +1468,8 @@ async function drainWarmQueue() {
       }
       const q = warmQueue.shift();
       try {
-        const r = await getStream(q, { allowPreview: false });
-        if (!r || !r.error) streamStats.warmed++;
+        const r = await getStream(q, { allowPreview: false, background: true });
+        if (r && !r.error && !r.cancelled) streamStats.warmed++;
       } catch {}
     }
   } finally {
@@ -1272,6 +1490,7 @@ app.get('/api/stream-cache/stats', (req, res) => {
   res.json({
     entries: streamCache.size,
     pending: streamPending.size,
+    backgroundPending: backgroundPending.size,
     queued: warmQueue.length,
     previewEntries: previewCache.size,
     max: STREAM_CACHE_MAX,
@@ -1282,6 +1501,10 @@ app.get('/api/stream-cache/stats', (req, res) => {
     previews: streamStats.previews,
     fallbacks: streamStats.fallbacks,
     evictions: streamStats.evictions,
+    retriesSuppressed: streamStats.retriesSuppressed,
+    retryCooldownMs: STREAM_RETRY_COOLDOWN_MS,
+    resolverQueue: ytDlpQueue.pending,
+    resolverRunning: ytDlpQueue.running,
     oldestExpiresAt: oldest && oldest.expiresAt,
     fallbackConfig: streamFallback.stats(),
   });
@@ -1370,8 +1593,32 @@ app.get('/stream', async (req, res) => {
   if (preview) rememberPreview(query, preview, query, 30);
 
   try {
-    const data = await getStream(query);
-    if (data.error) return res.status(data.status || 502).json({ error: data.error });
+    const sessionCookie = String(req.headers.cookie || '').match(/(?:^|;\s*)wpsid=([^;]+)/i);
+    const clientKey = sessionCookie
+      ? `session:${crypto.createHash('sha256').update(sessionCookie[1]).digest('hex').slice(0, 24)}`
+      : `guest:${String(req.ip || 'unknown')}`;
+    const upgrade = req.query.upgrade === '1';
+    const data = await getStream(query, {
+      clientKey,
+      upgrade,
+      supersede: !upgrade,
+      cancelBackground: true,
+    });
+    if (data.cancelled) {
+      res.set('Retry-After', '1');
+      return res.status(409).json({
+        error: 'Stream resolution was superseded',
+        retryAfterMs: 1000,
+      });
+    }
+    if (data.error) {
+      const retryAfterMs = Math.max(0, Number(data.retryAfterMs) || 0);
+      if (retryAfterMs > 0) {
+        res.set('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
+        return res.status(data.status || 503).json({ error: data.error, retryAfterMs });
+      }
+      return res.status(data.status || 502).json({ error: data.error });
+    }
     res.set('X-WP-Stream-Cache', data.cache || 'miss');
     res.set('X-WP-Stream-Source', data.source || 'youtube');
     res.json(data);
@@ -1390,7 +1637,11 @@ app.get('/resolve', async (req, res) => {
   if (!/^https?:\/\//.test(url)) return res.status(400).json({ error: 'Missing ?url=' });
 
   try {
-    const info = await ytdlp(url, { dumpSingleJson: true, noWarnings: true, ...(fs.existsSync('/var/lib/ytdlp/cookies.txt') ? { cookies: '/var/lib/ytdlp/cookies.txt' } : {}) });
+    const info = await runYtDlpExclusive(
+      url,
+      ytdlpFlags({ dumpSingleJson: true }),
+      ytdlpOptions(20000),
+    );
     const audioFormats = (info.formats || []).filter(
       (f) => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
     );

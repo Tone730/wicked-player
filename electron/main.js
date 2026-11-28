@@ -1,3 +1,12 @@
+/* Logging must never take down the desktop app. In particular, Windows can
+   close an inherited stdout pipe (for example when a launcher exits) while
+   electron-updater is still writing its status message. */
+for (const output of [process.stdout, process.stderr]) {
+  if (output && typeof output.on === 'function') {
+    output.on('error', () => {});
+  }
+}
+
 const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
@@ -433,10 +442,21 @@ let lastPresenceArt = '';
 let lastOverlaySignature = '';
 let lastTraySignature = '';
 
+/* Keep one canonical active-audio lookup for overlay polling and commands.
+   The renderer may expose several audio elements, so prefer the app's active
+   element and only fall back to the first one for older hosted builds. */
+function activeAudioProbe() {
+  return (
+    typeof window.__wpGetActiveAudio === 'function'
+      ? window.__wpGetActiveAudio()
+      : null
+  ) || document.querySelector('audio');
+}
+
 /* A real function is used (instead of a template string) so escapes such as
    \n and regex groups survive verbatim via Function.prototype.toString(). */
 function playerStateProbe() {
-  const a = document.querySelector('audio');
+  const a = activeAudioProbe();
   const bar = document.querySelector(
     'footer, [class*="foobar"], [class*="bar-center"], [class*="player-bar"]'
   );
@@ -492,7 +512,13 @@ function playerStateProbe() {
     dur: a ? (a.duration || 0) : 0,
   };
 }
-const PLAYER_STATE_SCRIPT = '(' + playerStateProbe.toString() + ')()';
+const ACTIVE_AUDIO_PROBE_SCRIPT = activeAudioProbe.toString();
+const ACTIVE_AUDIO_DRIVER_PREFIX =
+  `const activeAudioProbe = ${ACTIVE_AUDIO_PROBE_SCRIPT}; const a = activeAudioProbe();`;
+const PLAYER_STATE_SCRIPT = `(() => {
+  const activeAudioProbe = ${ACTIVE_AUDIO_PROBE_SCRIPT};
+  return (${playerStateProbe.toString()})();
+})()`;
 
 function readPlayerState() {
   if (!win || !win.webContents || win.webContents.isDestroyed()) return Promise.resolve(null);
@@ -548,23 +574,23 @@ function runOverlayCmd(cmd) {
   const c = String(cmd.type || '');
   if (c === 'toggle') {
     execDriver(
-      `(() => { const a = document.querySelector('audio');
-        if (a) { a.paused ? a.play().catch(()=>{}) : a.pause(); }
+      `(() => { ${ACTIVE_AUDIO_DRIVER_PREFIX}
+        if (a) { if (a.paused) a.play().catch(()=>{}); else { window.__wpBumpUserPauseSeq?.(); a.pause(); } }
         else { const bs=[...document.querySelectorAll('button')];
                const pl=bs.find(b=>/^\s*(play|pause)\s*$/i.test(b.getAttribute('aria-label')||b.title||b.textContent||''));
                if(pl) pl.click(); } })()`
     );
   } else if (c === 'play') {
-    execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.play().catch(()=>{}); })()`);
+    execDriver(`(() => { ${ACTIVE_AUDIO_DRIVER_PREFIX} if(a) a.play().catch(()=>{}); })()`);
   } else if (c === 'pause') {
-    execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.pause(); })()`);
+    execDriver(`(() => { ${ACTIVE_AUDIO_DRIVER_PREFIX} if(a) { window.__wpBumpUserPauseSeq?.(); a.pause(); } })()`);
   } else if (c === 'next') {
     execDriver(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.title||'')==='Next'); if(b) b.click(); })()`);
   } else if (c === 'prev') {
     execDriver(`(() => { const b=[...document.querySelectorAll('button')].find(x=>(x.title||'')==='Previous'); if(b) b.click(); })()`);
   } else if (c === 'seek') {
     const v = Number(cmd.value || 0);
-    execDriver(`(() => { const a=document.querySelector('audio'); if(a) a.currentTime=${v}; })()`);
+    execDriver(`(() => { ${ACTIVE_AUDIO_DRIVER_PREFIX} if(a) a.currentTime=${v}; })()`);
   } else if (c === 'close-overlay') {
     toggleOverlay();
   }

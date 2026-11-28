@@ -43,6 +43,8 @@
       };
     },
   };
+  const playbackPolicy = window.wpPlaybackPolicy;
+  if (!playbackPolicy) throw new Error('Wicked Player playback policy failed to load');
   const shouldNotify = notificationPolicy.createNotificationDeduper(5000);
 
   // stream resolve cache: instant re-play of tracks you already loaded
@@ -63,54 +65,242 @@
   // Map the proxied audio URL back to its resolver data (including video_id).
   const streamByAudio = new Map();
   const previewUpgrades = new Map();
+  const explicitPauseByAudio = new WeakMap();
   const wpPrefetched = new Set();
   let adjacentTimer = null;
 
   function normalizedAudioUrl(value) {
+    return playbackPolicy.normalizeAudioUrl(value, location.origin);
+  }
+
+  function getSelectionSeq() {
     try {
-      const url = new URL(String(value || ''), location.origin);
-      return url.pathname + url.search;
-    } catch {
-      return String(value || '');
+      if (typeof window.__wpGetSelectionSeq === 'function') {
+        return Number(window.__wpGetSelectionSeq()) || 0;
+      }
+    } catch {}
+    return Number(window.__wpSelectionSeq) || 0;
+  }
+
+  function getUserPauseSeq() {
+    try {
+      if (typeof window.__wpGetUserPauseSeq === 'function') {
+        return Number(window.__wpGetUserPauseSeq()) || 0;
+      }
+    } catch {}
+    return null;
+  }
+
+  function getPlaybackContext(track) {
+    let context = {};
+    try {
+      if (typeof window.__wpGetPlaybackContext === 'function') {
+        context = window.__wpGetPlaybackContext() || {};
+      }
+    } catch {}
+    const uiTrack = track || currentTrackFromUI() || {};
+    return {
+      ...context,
+      currentId: context.currentId ?? uiTrack.id ?? null,
+      currentName: context.currentName ?? uiTrack.name ?? '',
+      currentArtist: context.currentArtist ?? uiTrack.artist ?? '',
+    };
+  }
+
+  function samePlaybackTrack(left, right) {
+    return playbackPolicy.sameTrack(left, right);
+  }
+
+  function getAudio() {
+    try {
+      if (typeof window.__wpGetActiveAudio === 'function') {
+        const active = window.__wpGetActiveAudio();
+        if (active) return active;
+      }
+    } catch {}
+    const audios = Array.from(document.querySelectorAll('audio'));
+    return audios.find((audio) => audio.dataset && audio.dataset.wpActive === '1')
+      || audios.find((audio) => !audio.paused && !audio.ended)
+      || audios[0]
+      || null;
+  }
+
+  function audioSource(audio) {
+    return normalizedAudioUrl(audio && (audio.currentSrc || audio.src) || '');
+  }
+
+  function findPreviewUpgrade(audio) {
+    const source = audioSource(audio);
+    if (!source) return null;
+    for (const state of previewUpgrades.values()) {
+      if (state.stopped || !state.expectedSource) continue;
+      if (normalizedAudioUrl(state.expectedSource) !== source) continue;
+      if (state.selectionSeq && getSelectionSeq() !== state.selectionSeq) continue;
+      return state;
     }
+    return null;
+  }
+
+  function releaseDeferredPreviewEnd(state) {
+    if (!state || !state.deferredEnded || !state.audio) return;
+    const audio = state.audio;
+    if (audioSource(audio) !== normalizedAudioUrl(state.expectedSource || '')) return;
+    try { audio.dispatchEvent(new Event('ended', { bubbles: true })); } catch {}
+  }
+
+  window.__wpShouldDeferEnded = (audio) => {
+    const state = findPreviewUpgrade(audio);
+    if (!state) return false;
+    state.deferredEnded = true;
+    state.audio = audio;
+    return true;
+  };
+
+  function syncActiveAudio() {
+    const active = getAudio();
+    document.querySelectorAll('audio').forEach((audio) => {
+      if (audio.dataset) audio.dataset.wpActive = audio === active ? '1' : '0';
+    });
+    return active;
   }
 
   function applyFullStream(preview, full) {
     const audio = getAudio();
-    if (!audio || !preview?.proxied_url || !full?.proxied_url) return false;
-    const current = normalizedAudioUrl(audio.currentSrc || audio.src);
-    const expected = normalizedAudioUrl(preview.proxied_url);
-    if (!current || current !== expected) return false;
+    const expected = playbackPolicy.resolveMediaSource(preview, location.origin);
+    const nextSource = playbackPolicy.resolveMediaSource(full, location.origin);
+    if (!audio || !expected || !nextSource) return false;
 
-    const wasPlaying = !audio.paused;
-    const resumeAt = Number(audio.currentTime) || 0;
-    const nextSource = new URL(full.proxied_url, location.origin).toString();
+    const current = normalizedAudioUrl(audio.currentSrc || audio.src);
+    if (!current || current !== normalizedAudioUrl(expected)) return false;
+
+    const selectionSeq = getSelectionSeq();
+    if (selectionSeq && getSelectionSeq() !== selectionSeq) return false;
+
+    const contextAtSwap = getPlaybackContext();
+    const elementPlaying = !audio.paused && !audio.ended;
+    const appPlaying = contextAtSwap.playing === true;
+    const userPauseSeq = getUserPauseSeq();
+    const hasUserPauseHook = userPauseSeq !== null;
+    const resumeAt = playbackPolicy.clampResumePosition(audio.currentTime, Infinity);
+    const expectedNext = normalizedAudioUrl(nextSource);
+    const pauseState = explicitPauseByAudio.get(audio);
+    let settled = false;
+    let explicitlyPaused = !!(pauseState && normalizedAudioUrl(pauseState.source) === current);
+
+    const markExplicitPause = (event) => {
+      if (hasUserPauseHook) return;
+      if (playbackPolicy.isExplicitPauseEvent(event, { wasPlaying: elementPlaying || appPlaying })) {
+        explicitlyPaused = true;
+      }
+    };
+    const cleanup = () => {
+      document.removeEventListener('click', markExplicitPause, true);
+      document.removeEventListener('keydown', markExplicitPause, true);
+    };
     const resume = () => {
-      try {
-        if (resumeAt > 0 && Math.abs((audio.currentTime || 0) - resumeAt) > 0.5) {
-          audio.currentTime = resumeAt;
+      if (settled) return;
+      if (audio !== getAudio()) return;
+      if (normalizedAudioUrl(audio.currentSrc || audio.src) !== expectedNext) return;
+      if (selectionSeq && getSelectionSeq() !== selectionSeq) return;
+      if (audio.readyState < 1) return;
+
+      let userPaused = false;
+      if (userPauseSeq !== null) {
+        const currentPauseSeq = getUserPauseSeq();
+        if (currentPauseSeq !== null && currentPauseSeq !== userPauseSeq) {
+          const context = getPlaybackContext();
+          if (context.playing !== true) {
+            userPaused = true;
+            explicitlyPaused = true;
+          }
         }
-        if (wasPlaying) audio.play().catch(() => {});
+      }
+      const currentPauseState = explicitPauseByAudio.get(audio);
+      if (currentPauseState && normalizedAudioUrl(currentPauseState.source) === current) {
+        explicitlyPaused = true;
+      }
+      const context = getPlaybackContext();
+      const shouldResume = playbackPolicy.shouldResumeFullStream({
+        elementPlaying: !audio.paused && !audio.ended,
+        appPlaying: context.playing === true,
+        explicitlyPaused,
+        userPaused,
+      });
+
+      settled = true;
+      cleanup();
+      try {
+        const duration = Number(audio.duration);
+        let position = playbackPolicy.clampResumePosition(
+          resumeAt,
+          Number.isFinite(duration) ? duration : Infinity,
+        );
+        if (Number.isFinite(duration) && duration > 0 && position >= duration) {
+          position = Math.max(0, duration - 0.05);
+        }
+        if (position > 0 && Math.abs((audio.currentTime || 0) - position) > 0.5) {
+          audio.currentTime = position;
+        }
+        if (shouldResume) audio.play().catch(() => {});
       } catch {}
     };
+
+    if (!hasUserPauseHook) {
+      document.addEventListener('click', markExplicitPause, true);
+      document.addEventListener('keydown', markExplicitPause, true);
+    }
     audio.addEventListener('loadedmetadata', resume, { once: true });
+    audio.addEventListener('canplay', resume, { once: true });
+    const playbackRate = audio.playbackRate;
+    const preservesPitch = audio.preservesPitch;
     audio.src = nextSource;
-    try { audio.load(); } catch {}
-    setTimeout(resume, 1200);
+    try {
+      audio.playbackRate = playbackRate;
+      if ('preservesPitch' in audio) audio.preservesPitch = preservesPitch;
+      audio.load();
+    } catch {}
+    setTimeout(resume, 1500);
+    setTimeout(cleanup, 6000);
     return true;
   }
 
-  function schedulePreviewUpgrade(key, preview) {
+  function schedulePreviewUpgrade(key, preview, requestSeq) {
     if (!key || !preview?.preview) return;
-    if (previewUpgrades.has(key)) return;
-    const state = { stopped: false, attempts: 0 };
+    const selectionSeq = requestSeq == null ? getSelectionSeq() : Number(requestSeq) || 0;
+    const existing = previewUpgrades.get(key);
+    if (existing) {
+      if (existing.selectionSeq === selectionSeq) return;
+      existing.stopped = true;
+      previewUpgrades.delete(key);
+    }
+    const expectedSource = playbackPolicy.resolveMediaSource(preview, location.origin);
+    const state = {
+      stopped: false,
+      attempts: 0,
+      selectionSeq,
+      expectedSource,
+      deferredEnded: false,
+      audio: null,
+    };
     previewUpgrades.set(key, state);
 
     const poll = async () => {
       if (state.stopped) return;
+      if (state.selectionSeq && getSelectionSeq() !== state.selectionSeq) {
+        state.stopped = true;
+        previewUpgrades.delete(key);
+        return;
+      }
       state.attempts++;
+      let retryAfterMs = 0;
       try {
-        const response = await _origFetch('/stream?q=' + encodeURIComponent(key), { credentials: 'include' });
+        const response = await _origFetch('/stream?q=' + encodeURIComponent(key) + '&upgrade=1', { credentials: 'include' });
+        if (state.stopped) return;
+        if (state.selectionSeq && getSelectionSeq() !== state.selectionSeq) {
+          state.stopped = true;
+          previewUpgrades.delete(key);
+          return;
+        }
         if (response.ok) {
           const data = await response.json();
           if (data?.audio_url && !data.preview) {
@@ -120,30 +310,39 @@
             applyFullStream(preview, data);
             return;
           }
+          retryAfterMs = Math.max(0, Number(data?.retryAfterMs) || 0);
+        } else {
+          try {
+            const data = await response.clone().json();
+            retryAfterMs = Math.max(0, Number(data?.retryAfterMs) || 0);
+          } catch {}
         }
       } catch {}
       if (state.attempts >= 30 || state.stopped) {
         previewUpgrades.delete(key);
+        if (!state.stopped) releaseDeferredPreviewEnd(state);
         return;
       }
-      setTimeout(poll, 1500);
+      setTimeout(poll, Math.max(1500, retryAfterMs + 250));
     };
     setTimeout(poll, 1200);
   }
 
-  function rememberStream(key, data, schedule) {
+  function rememberStream(key, data, schedule, selectionSeq) {
     if (!data || !data.proxied_url) return;
+    const requestSeq = selectionSeq == null ? getSelectionSeq() : Number(selectionSeq) || 0;
+    const stale = requestSeq > 0 && getSelectionSeq() > 0 && requestSeq !== getSelectionSeq();
     /* Provider previews are a fast fallback, not a full-resolution cache.
        Keep them for the current audio element, but never let one shadow the
        complete stream that the server resolves in the background. */
-    if (!data.preview) {
+    if (!data.preview && !stale) {
       streamMem[key] = { at: Date.now(), data };
       saveStream();
     }
     streamByAudio.set(location.origin + data.proxied_url, data);
     streamByAudio.set(data.proxied_url, data);
-    if (data.preview) schedulePreviewUpgrade(key, data);
-    if (schedule) { try { scheduleAdjacentPrefetch(key); } catch {} }
+    if (data.preview && !stale) schedulePreviewUpgrade(key, data, requestSeq);
+    if (schedule && !stale) { try { scheduleAdjacentPrefetch(key); } catch {} }
   }
   for (const k of Object.keys(streamMem)) {
     if (streamMem[k] && streamMem[k].data) rememberStream(k, streamMem[k].data, false);
@@ -178,25 +377,28 @@
     const sm = /\?q=([^&]+)/.exec(url);
     if (url.includes('/stream?q=') && sm) {
       const key = decodeURIComponent(sm[1]).toLowerCase();
+      const requestSelectionSeq = getSelectionSeq();
       const hit = streamMem[key];
       if (hit && Date.now() - hit.at < 20 * 60 * 1000) {
-        rememberStream(key, hit.data, false);
+        rememberStream(key, hit.data, false, requestSelectionSeq);
         return Promise.resolve(new Response(JSON.stringify(hit.data), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
       return _origFetch.apply(this, args).then(async (res) => {
         const action = classify(res);
         if (action && action.retry) {
+          if (requestSelectionSeq && getSelectionSeq() !== requestSelectionSeq) return res;
           await new Promise((r) => setTimeout(r, 1500));
+          if (requestSelectionSeq && getSelectionSeq() !== requestSelectionSeq) return res;
           const retried = await _origFetch.apply(this, args);
           if (retried.ok) {
-            retried.clone().json().then((data) => { rememberStream(key, data); }).catch(() => {});
+            retried.clone().json().then((data) => { rememberStream(key, data, true, requestSelectionSeq); }).catch(() => {});
           } else {
             classify(retried);
           }
           return retried;
         }
         if (res.ok) {
-          res.clone().json().then((data) => { rememberStream(key, data); }).catch(() => {});
+          res.clone().json().then((data) => { rememberStream(key, data, true, requestSelectionSeq); }).catch(() => {});
         }
         return res;
       });
@@ -275,7 +477,6 @@
     if (lines.length >= 2) return { name: lines[0], artist: lines[1] };
     return null;
   }
-  function getAudio() { return document.querySelector('audio'); }
   function rowText(el) {
     if (!el) return '';
     const clone = el.cloneNode(true);
@@ -334,25 +535,50 @@
   }
 
   function attachAudioHooks() {
-    const a = getAudio();
-    if (!a || a.__wpHooks) return false;
-    a.__wpHooks = true;
-    try { a.preload = 'auto'; } catch {}
-    a.addEventListener('loadstart', () => { const d = currentStreamForAudio(a); if (d) setVideoTrack(d); });
-    a.addEventListener('play', () => {
-      const t = currentTrackFromUI(); if (t && t.name) lastTrack = t;
-      const d = currentStreamForAudio(a); if (d) setVideoTrack(d);
-      scheduleAdjacentPrefetch(d && d.title ? d.title.toLowerCase() : '');
-      syncVideoFromAudio(true);
-    });
-    a.addEventListener('playing', () => syncVideoFromAudio(true));
-    a.addEventListener('pause', () => wpVideoPause());
-    a.addEventListener('seeking', () => wpVideoSeek(a.currentTime || 0));
-    a.addEventListener('timeupdate', () => wpVideoSeek(a.currentTime || 0));
-    a.addEventListener('ratechange', () => wpVideoRate(a.playbackRate || 1));
-    a.addEventListener('ended', () => wpVideoPause());
-    a.addEventListener('ended', onEnded);
-    return true;
+    const audios = Array.from(document.querySelectorAll('audio'));
+    let attached = false;
+    for (const a of audios) {
+      if (a.__wpHooks) continue;
+      attached = true;
+      a.__wpHooks = true;
+      try { a.preload = 'auto'; } catch {}
+      const isActive = () => a === getAudio();
+      a.addEventListener('loadstart', () => {
+        if (!isActive()) return;
+        const d = currentStreamForAudio(a);
+        if (d) setVideoTrack(d);
+      });
+      a.addEventListener('play', () => {
+        explicitPauseByAudio.delete(a);
+        if (!isActive()) return;
+        const t = currentTrackFromUI();
+        if (t && t.name) lastTrack = t;
+        const d = currentStreamForAudio(a);
+        if (d) setVideoTrack(d);
+        scheduleAdjacentPrefetch(d && d.title ? d.title.toLowerCase() : '');
+        syncVideoFromAudio(true);
+      });
+      a.addEventListener('playing', () => { if (isActive()) syncVideoFromAudio(true); });
+      a.addEventListener('pause', () => {
+        const source = audioSource(a);
+        if (source && !a.ended) {
+          explicitPauseByAudio.set(a, { source, at: Date.now() });
+        }
+        if (isActive()) wpVideoPause();
+      });
+      a.addEventListener('seeking', () => { if (isActive()) wpVideoSeek(a.currentTime || 0); });
+      a.addEventListener('timeupdate', () => { if (isActive()) wpVideoSeek(a.currentTime || 0); });
+      a.addEventListener('ratechange', () => { if (isActive()) wpVideoRate(a.playbackRate || 1); });
+      a.addEventListener('ended', () => {
+        explicitPauseByAudio.delete(a);
+        if (isActive()) wpVideoPause();
+      });
+      a.addEventListener('ended', (event) => {
+        if (event.target === getAudio()) onEnded(event);
+      });
+    }
+    syncActiveAudio();
+    return attached || audios.length > 0;
   }
   new MutationObserver(() => attachAudioHooks()).observe(document.documentElement, { childList: true, subtree: true });
   attachAudioHooks();
@@ -540,24 +766,34 @@
   ensureVideoUI();
   setInterval(() => { ensureVideoButton(); wireLyricsVideoButton(); }, 1500);
 
-  async function onEnded() {
+  async function onEnded(event) {
     if (window.__wpContinuing) return;
+    const audio = event && event.target ? event.target : getAudio();
+    if (!audio || audio !== getAudio()) return;
+    if (typeof window.__wpShouldDeferEnded === 'function' && window.__wpShouldDeferEnded(audio)) return;
+    const endedContext = getPlaybackContext();
     await new Promise((r) => setTimeout(r, window.__wpGapless ? 0 : 1200));
-    const a = getAudio();
-    if (!a) return;
-    if (!a.paused || (a.src && a.currentTime > 0 && !a.ended)) return;
-    await continueRadio();
+    if (!audio || audio !== getAudio()) return;
+    if (!audio.paused || (audio.src && audio.currentTime > 0 && !audio.ended)) return;
+    const context = getPlaybackContext();
+    if (!playbackPolicy.shouldContinueRadio(context, endedContext)) return;
+    if (!samePlaybackTrack(context, endedContext)) return;
+    await continueRadio(endedContext);
   }
-  async function continueRadio() {
+  async function continueRadio(endedContext) {
     if (window.__wpContinuing) return;
     window.__wpContinuing = true;
+    const selectionSeq = getSelectionSeq();
     try {
-      const seed = lastTrack || currentTrackFromUI() || { name: '', artist: '' };
+      const rawSeed = endedContext || lastTrack || currentTrackFromUI() || {};
+      const seed = playbackPolicy.normalizeTrack(rawSeed);
       const artistSeed = (seed.artist || '').split(',')[0].trim();
       if (artistSeed) markPlayed(seed.name || artistSeed);
       const res = await fetch('/api/recommend?artist=' + encodeURIComponent(artistSeed) + '&name=' + encodeURIComponent(seed.name || ''));
       if (!res.ok) throw new Error('recommend failed');
       const tracks = await res.json();
+      if (selectionSeq && getSelectionSeq() !== selectionSeq) return;
+      if (!samePlaybackTrack(getPlaybackContext(), endedContext || seed)) return;
       const fresh = tracks.find((t) => t && t.name && !played.has(t.name.toLowerCase()));
       if (!fresh) throw new Error('nothing fresh');
       markPlayed(fresh.name);
@@ -569,12 +805,28 @@
         searchBtn.click();
         const clicked = await waitForAndClickResult(fresh);
         if (clicked) return;
+        if (selectionSeq && getSelectionSeq() !== selectionSeq) return;
       }
-      const a = getAudio();
-      if (a && fresh.stream_url) {
-        a.src = fresh.stream_url.startsWith('http') ? fresh.stream_url : location.origin + fresh.stream_url;
-        a.play().catch(() => {});
+      if (typeof window.__wpPlayTrack === 'function') {
+        await window.__wpPlayTrack(fresh, null);
+        return;
       }
+
+      /* Legacy fallback: resolve the JSON endpoint before assigning media and
+         reject the response if a newer track was selected while it loaded. */
+      const audio = getAudio();
+      if (!audio) return;
+      const query = [fresh.name, fresh.artist].filter(Boolean).join(' ');
+      const response = await _origFetch('/stream?q=' + encodeURIComponent(query), { credentials: 'include' });
+      if (!response.ok) throw new Error('stream resolve failed');
+      const data = await response.json();
+      const source = playbackPolicy.resolveMediaSource(data, location.origin);
+      if (!source) throw new Error(data.error || 'no playable stream');
+      if (audio !== getAudio()) return;
+      if (selectionSeq && getSelectionSeq() !== selectionSeq) return;
+      rememberStream(query.toLowerCase(), data, false);
+      audio.src = source;
+      audio.play().catch(() => {});
     } catch {} finally { setTimeout(() => { window.__wpContinuing = false; }, 1500); }
   }
   function waitForAndClickResult(track, timeoutMs = 12000) {
@@ -778,7 +1030,10 @@
     if (!until || until <= Date.now()) { try { localStorage.removeItem(SLEEP_KEY); } catch (e) {} return; }
     var ms = Math.min(until - Date.now(), 6 * 60 * 60 * 1000);
     setTimeout(function () {
-      try { var a = document.querySelector("audio"); if (a) a.pause(); } catch (e) {}
+      try {
+        var a = (typeof window.__wpGetActiveAudio === 'function' && window.__wpGetActiveAudio()) || document.querySelector("audio");
+        if (a) { try { window.__wpBumpUserPauseSeq?.(); } catch (e) {} a.pause(); }
+      } catch (e) {}
       try { localStorage.removeItem(SLEEP_KEY); } catch (e) {}
     }, ms);
   }
