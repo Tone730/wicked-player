@@ -4,9 +4,9 @@ Ad-free music player with effects, lyrics, overlays, community profiles and Disc
 
 ## Download / Update
 
-**Latest release (v3.5.13):** https://github.com/Tone730/wicked-player/releases/latest
+**Latest release (v3.5.14):** https://github.com/Tone730/wicked-player/releases/latest
 
-Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.13.exe
+Direct installer: https://github.com/Tone730/wicked-player/releases/latest/download/Wicked-Player-Setup-3.5.14.exe
 
 Install once and the app auto-updates from GitHub (`latest.yml`). Existing installs from 3.5.0 onward pick up new releases automatically.
 
@@ -24,16 +24,17 @@ Install once and the app auto-updates from GitHub (`latest.yml`). Existing insta
 
 ![Wicked Player Discord presence settings](docs/screenshots/04-presence.png)
 
-## What's in v3.5.13
+## What's in v3.5.14
 
+- **Automatic Premium redemption** — member-to-member Premium gifts and Premium/jackpot listening rewards are redeemed immediately for the recipient.
+- **Visible redemption receipts** — senders, recipients, and admins can see who redeemed which gift or reward and when; the admin log also updates live.
+- **Faster cold-start playback** — a strict provider preview is resolved alongside yt-dlp, so playback can begin in a fraction of a second while the complete stream continues resolving in the background.
+- **Reliable Premium persistence** — the grant, receipt, and code-consumption state are committed atomically, so the app never reports success for a redemption that was not saved.
+- **Safe preview caching** — provider previews never enter the full-stream cache and are upgraded to the complete track when resolution finishes.
 - **Reliable full-track playback** — the newest selection preempts stale resolver work, preview endings no longer skip the queue, and full streams resume at the correct position.
-- **Accurate genre cards** — all 40 genre cards use a dedicated, genre-constrained catalog route instead of generic keyword results.
-- **Faster search and playback** — bounded search, serialized yt-dlp resolution, immediate provider previews and cached full-resolution upgrades reduce stalls.
-- **Reliable track matching** — fallback playback rejects fuzzy matches from a different artist and resolves only the selected track.
+- **Accurate genre cards and track matching** — all 40 genre cards use a dedicated, genre-constrained catalog route, and fuzzy matches from a different artist are rejected.
 - **Cleaner error reporting** — playback failures and rate limits are reported accurately without misleading “Saved” or “Save failed (502)” popups.
-- **Safe preview caching** — short provider previews never block a later full-resolution stream, and legacy preview entries are removed on upgrade.
-- **Hosted mode** — the desktop app connects straight to `https://wickedplayer.dev`. No local server, cookies, VPN or proxy setup is needed; playback fixes run server-side.
-- Updated Electron runtime and build dependencies for a safer, current desktop app.
+- **Hosted mode** — the desktop app connects straight to `https://wickedplayer.dev`. No local server, cookies, VPN, or proxy setup is needed; playback fixes run server-side.
 
 ## Repository layout
 

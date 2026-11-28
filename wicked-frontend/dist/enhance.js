@@ -844,26 +844,107 @@
     });
   }
 
-  /* ---- gift claim: open OUR discord invite, not the old one ---- */
+  /* ---- reward claim: premium rewards are already active; every other
+         reward still claims through OUR Discord invite, not the old one.
+         The authoritative reward list decides what is automatic, so the
+         decision never depends on the wording of a label. ---- */
   let wpInvite = null;
   fetch('/api/config/discord-invite').then((r) => r.json()).then((d) => { if (d.invite) wpInvite = d.invite; }).catch(() => {});
-  if (isDesktop || location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-    setInterval(() => {
-      try {
-        const btn = [...document.querySelectorAll('button')].find((b) => /claim on discord/i.test(b.textContent || ''));
-        if (btn && !btn.__wpInviteWired) {
-          btn.__wpInviteWired = true;
-          btn.addEventListener('click', (e) => {
-            e.stopImmediatePropagation();
-            const card = btn.closest('div') && btn.closest('div').parentElement ? btn.closest('div').parentElement : btn.parentElement;
-            const codeMatch = card ? (card.innerText.match(/WK-[A-Z2-9]{6}/) || [null])[0] : null;
-            if (codeMatch) { try { navigator.clipboard.writeText(codeMatch); } catch {} }
-            if (wpInvite) { window.open(wpInvite, '_blank'); }
-          }, true);
-        }
-      } catch {}
-    }, 2000);
+  var wpRewards = {};
+  function wpRefreshRewards() {
+    return fetch('/api/rewards', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (list) {
+        (Array.isArray(list) ? list : []).forEach(function (row) {
+          if (row && row.code) wpRewards[row.code] = row;
+        });
+        return list;
+      })
+      .catch(function () { return []; });
   }
+  function wpRewardRecord(row) {
+    if (!row) return null;
+    var codeNode = row.querySelector('.r-code');
+    var code = codeNode ? (codeNode.textContent || '').trim() : '';
+    if (!code) {
+      var match = (row.innerText || row.textContent || '').match(/WK-[A-Z2-9]{6}/i);
+      code = match ? match[0].toUpperCase() : '';
+    }
+    var record = code ? wpRewards[code] : null;
+    return { code: code, record: record || null };
+  }
+  function wpIsAutomaticReward(row) {
+    if (!row) return false;
+    if (row.dataset && row.dataset.wpAuto === '1') return true;
+    var info = wpRewardRecord(row);
+    var record = info.record;
+    if (record) {
+      if (record.autoRedeemed === true) return true;
+      if (record.status === 'redeemed' && (record.type === 'premium' || record.type === 'jackpot')) return true;
+    }
+    return /redeemed automatically/i.test((row.innerText || row.textContent || ''));
+  }
+  function wpMarkRewardRows() {
+    try {
+      var rows = document.querySelectorAll('.reward-row');
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        if (row.dataset && row.dataset.wpMarked === '1') continue;
+        var info = wpRewardRecord(row);
+        if (!info.code) continue;
+        row.dataset.wpMarked = '1';
+        var record = info.record;
+        var automatic = wpIsAutomaticReward(row);
+        if (automatic) row.dataset.wpAuto = '1';
+        if (!record) continue;
+        var infoBox = row.querySelector('.r-info');
+        if (!infoBox || infoBox.querySelector('.wp-auto-note')) continue;
+        var note = document.createElement('div');
+        note.className = 'wp-auto-note';
+        note.style.cssText = 'font-size:11px;margin-top:4px;color:#34d399';
+        var when = Number(record.redeemedAt || record.at || 0);
+        var stamp = when ? new Date(when).toLocaleString() : 'just now';
+        note.textContent = record.autoRedeemed
+          ? 'Redeemed automatically - ' + (record.redeemedBy || record.user || 'you') + ' - ' + stamp
+          : 'Claimed - ' + (record.redeemedBy || record.user || 'you') + ' - ' + stamp;
+        infoBox.appendChild(note);
+      }
+    } catch (e) {}
+  }
+  function wpWatchRewardRows() {
+    try {
+      var root = document.getElementById('root') || document.body || document.documentElement;
+      if (!root) return;
+      var observer = new MutationObserver(function () { wpMarkRewardRows(); });
+      observer.observe(root, { childList: true, subtree: true });
+    } catch (e) {}
+  }
+  wpWatchRewardRows();
+  wpRefreshRewards().then(function () { wpMarkRewardRows(); });
+  setInterval(function () { wpRefreshRewards().then(function () { wpMarkRewardRows(); }); }, 30000);
+
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    const btn = target && target.closest ? target.closest('button') : null;
+    if (!btn) return;
+    if (!/view \/ claim reward|claim on discord/i.test(btn.textContent || '')) return;
+    const row = btn.closest('.reward-row');
+    const card = row || btn.parentElement || btn;
+    const cardText = card ? (card.innerText || card.textContent || '') : '';
+    if (wpIsAutomaticReward(row || card)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      wpNotify('This Premium reward was redeemed automatically and is already active.');
+      return;
+    }
+    const codeMatch = cardText.match(/WK-[A-Z2-9]{6}/i);
+    if (codeMatch) { try { navigator.clipboard.writeText(codeMatch[0].toUpperCase()); } catch {} }
+    if (!wpInvite) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    window.open(wpInvite, '_blank');
+    wpNotify('Code copied - paste it in the Discord claims channel');
+  }, true);
 
   /* ---- rewire the app's in-window "Mini player overlay" button to the true overlay ---- */
   if (isDesktop) {
@@ -1113,19 +1194,89 @@
     box.style.cssText = "position:fixed;bottom:130px;right:12px;z-index:10001;background:rgba(18,16,31,.97);border:1px solid rgba(168,85,247,.4);border-radius:14px;padding:16px;width:290px;font-family:inherit;box-shadow:0 14px 40px rgba(0,0,0,.5)";
     box.style.width = "312px"; box.style.maxHeight = "calc(100vh - 150px)"; box.style.overflowY = "auto";
     box.innerHTML = '<div style="font-weight:800;font-size:13px;margin-bottom:10px;color:#d8b4fe">&#127873; Gifts &amp; Premium</div>'
-      + '<div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">Redeem a code</div><input id="wpGiftCode" placeholder="WK-XXXXXX" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:6px;font-size:13px;text-transform:uppercase"><button id="wpGiftGo" style="width:100%;background:linear-gradient(135deg,#a855f7,#ec4899);border:none;color:#fff;border-radius:9px;padding:9px;font-weight:700;cursor:pointer;font-size:12px;margin-bottom:10px">Redeem</button>'
+      + '<div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">Redeem a code</div><input id="wpGiftCode" placeholder="ABCD2345" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:6px;font-size:13px;text-transform:uppercase"><button id="wpGiftGo" style="width:100%;background:linear-gradient(135deg,#a855f7,#ec4899);border:none;color:#fff;border-radius:9px;padding:9px;font-weight:700;cursor:pointer;font-size:12px;margin-bottom:10px">Redeem</button>'
       + '<div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px"><div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">Gift premium to a friend <span style="color:#d8b4fe">(Premium)</span></div><div style="display:flex;gap:6px;margin-bottom:6px"><input id="wpGiftUser" placeholder="username" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:8px;font-size:12px"><select id="wpGiftDays" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:8px;font-size:12px"><option value="30">30 days</option><option value="7">7 days</option></select></div><button id="wpGiftSend" style="width:100%;background:rgba(168,85,247,.22);border:1px solid rgba(168,85,247,.5);color:#f4f2ff;border-radius:9px;padding:8px;font-weight:600;cursor:pointer;font-size:12px">Send gift</button></div>'
-      + '<div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px;margin-top:10px"><div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">Referrals</div><div style="font-size:11px;color:rgba(244,242,255,.55);margin-bottom:6px">Your code: <b id="wpRefCode" style="color:#d8b4fe;user-select:all">...</b> &middot; <span id="wpRefCount">0</span> referred &middot; 3 = 7 days Premium</div><div style="display:flex;gap:6px;margin-bottom:6px"><input id="wpRefApply" placeholder="friend WP-CODE" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:8px;font-size:12px;text-transform:uppercase"><button id="wpRefGo" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:8px;font-weight:600;cursor:pointer;font-size:12px">Apply</button></div></div>'
+      + '<div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px;margin-top:10px"><div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">Premium activity</div><div id="wpGiftHistory" style="font-size:11px;color:rgba(244,242,255,.65);line-height:1.5">Loading premium activity…</div></div>'
+      + '<div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px"><div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">Referrals</div><div style="font-size:11px;color:rgba(244,242,255,.55);margin-bottom:6px">Your code: <b id="wpRefCode" style="color:#d8b4fe;user-select:all">...</b> &middot; <span id="wpRefCount">0</span> referred &middot; 3 = 7 days Premium</div><div style="display:flex;gap:6px;margin-bottom:6px"><input id="wpRefApply" placeholder="friend WP-CODE" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:8px;font-size:12px;text-transform:uppercase"><button id="wpRefGo" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:8px;font-weight:600;cursor:pointer;font-size:12px">Apply</button></div></div>'
       + '<div style="border-top:1px solid rgba(255,255,255,.1);padding-top:10px;margin-top:10px"><div style="font-weight:700;font-size:11px;margin-bottom:5px;color:rgba(244,242,255,.7)">No code? Request premium</div><input id="wpGiftMsg" placeholder="tell the admin why" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px 10px;margin-bottom:6px;font-size:13px"><button id="wpGiftReq" style="width:100%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:#f4f2ff;border-radius:9px;padding:9px;font-weight:600;cursor:pointer;font-size:12px">Send request</button></div>'
       + '<div id="wpGiftOut" style="font-size:11px;margin-top:8px;min-height:16px"></div><button id="wpGiftX" style="position:absolute;top:8px;right:10px;background:none;border:none;color:rgba(244,242,255,.5);cursor:pointer;font-size:14px">&#10005;</button>';
     document.body.appendChild(box);
     function say(msg, ok) { var out = box.querySelector("#wpGiftOut"); out.style.color = ok ? "#34d399" : "#fda4af"; out.textContent = msg; }
+    function giftDate(value) {
+      var at = Number(value) || 0;
+      if (!at) return "just now";
+      try { return new Date(at).toLocaleString(); } catch { return "just now"; }
+    }
+    function renderGiftHistory(data) {
+      var history = box.querySelector("#wpGiftHistory");
+      if (!history) return;
+      history.textContent = "";
+      var rows = [];
+      var seen = {};
+      (data && data.sent || []).forEach(function(gift) { var id = gift.id || "gift:" + gift.user + ":" + (gift.at || 0); if (!seen[id]) { seen[id] = true; rows.push({ gift: gift, label: "Sent to " + gift.user }); } });
+      (data && data.received || []).forEach(function(gift) { var id = gift.id || "gift:" + gift.user + ":" + (gift.at || 0); if (!seen[id]) { seen[id] = true; rows.push({ gift: gift, label: "Received from " + gift.giftedBy }); } });
+      (data && data.redemptions || []).forEach(function(record) {
+        var id = record.id || "record:" + record.kind + ":" + (record.at || 0);
+        if (seen[id] || record.kind === "gift") return;
+        seen[id] = true;
+        var label = record.kind === "reward" ? "Listening reward redeemed" : (record.kind === "referral" ? "Referral reward redeemed" : "Premium code redeemed");
+        rows.push({ gift: record, label: label });
+      });
+      rows.sort(function(left, right) { return Number(right.gift.redeemedAt || right.gift.at || 0) - Number(left.gift.redeemedAt || left.gift.at || 0); });
+      if (!rows.length) {
+        history.textContent = "No premium activity yet.";
+        return;
+      }
+      rows.slice(0, 6).forEach(function(row) {
+        var line = document.createElement("div");
+        line.style.cssText = "padding:5px 0;border-bottom:1px solid rgba(255,255,255,.06)";
+        var title = document.createElement("div");
+        title.style.cssText = "font-weight:700;color:#f4f2ff";
+        title.textContent = row.label;
+        var detail = document.createElement("div");
+        detail.style.cssText = "color:rgba(244,242,255,.55)";
+        var record = row.gift || {};
+        var who = record.redeemedBy || record.user || "";
+        var how = record.autoRedeemed ? "Redeemed automatically" : "Redeemed";
+        detail.textContent = (Number(record.days) || 0) + " days · " + how + (who ? " by " + who : "") + " · " + giftDate(record.redeemedAt || record.at);
+        line.appendChild(title);
+        line.appendChild(detail);
+        history.appendChild(line);
+      });
+    }
+    function refreshGiftHistory() {
+      var history = box.querySelector("#wpGiftHistory");
+      if (history) history.textContent = "Loading premium activity…";
+      fetch("/api/premium/gifts", { credentials: "include" })
+        .then(function(response) { return response.ok ? response.json() : null; })
+        .then(function(data) { if (data) renderGiftHistory(data); else if (history) history.textContent = "Premium activity is unavailable right now."; })
+        .catch(function() { if (history) history.textContent = "Premium activity is unavailable right now."; });
+    }
     box.querySelector("#wpGiftX").onclick = function() { box.remove(); };
-    box.querySelector("#wpGiftGo").onclick = function() { fetch("/api/reward/redeem", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: box.querySelector("#wpGiftCode").value }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { say("Premium active for " + d.days + " days!", true); } else say(d.error || "Could not redeem"); }).catch(function() { say("Network error"); }); };
+    box.querySelector("#wpGiftGo").onclick = function() { fetch("/api/reward/redeem", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: box.querySelector("#wpGiftCode").value }) }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.error || "Could not redeem"); return d; }); }).then(function(d) { if (d.ok) { say("Premium active for " + d.days + " days — redeemed successfully!", true); refreshGiftHistory(); } else say(d.error || "Could not redeem"); }).catch(function(error) { say(error && error.message || "Could not redeem"); }); };
     box.querySelector("#wpGiftReq").onclick = function() { fetch("/api/premium/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: (window.__WP_USER || {}).username, message: box.querySelector("#wpGiftMsg").value }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { say("Request sent!", true); } else say(d.error || "Could not send"); }).catch(function() { say("Network error"); }); };
-    box.querySelector("#wpGiftSend").onclick = function() { fetch("/api/premium/gift", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: box.querySelector("#wpGiftUser").value, days: Number(box.querySelector("#wpGiftDays").value) }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { say("Gifted " + d.days + " days to " + d.user + "!", true); } else say(d.error || "Could not gift"); }).catch(function() { say("Network error"); }); };
+    var pendingGift = null;
+    function giftRequestId(user, days) {
+      var key = user + "|" + days;
+      if (!pendingGift || pendingGift.key !== key) {
+        pendingGift = {
+          key: key,
+          id: (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : ("gift-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10)),
+        };
+      }
+      return pendingGift.id;
+    }
+    box.querySelector("#wpGiftSend").onclick = function() {
+      var target = box.querySelector("#wpGiftUser").value.trim();
+      var days = Number(box.querySelector("#wpGiftDays").value);
+      fetch("/api/premium/gift", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: target, days: days, requestId: giftRequestId(target, days) }) })
+        .then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.error || "Could not gift"); return d; }); })
+        .then(function(d) { if (d.ok) { pendingGift = null; say(d.alreadyRedeemed ? "That gift was already redeemed - Premium is active!" : ("Gift redeemed automatically for " + d.user + " - " + d.days + " days of Premium is active!"), true); refreshGiftHistory(); } else say(d.error || "Could not gift"); })
+        .catch(function(error) { say(error && error.message || "Could not gift"); });
+    };
     box.querySelector("#wpRefGo").onclick = function() { fetch("/api/referrals/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: box.querySelector("#wpRefApply").value }) }).then(function(r) { return r.json(); }).then(function(d) { if (d.ok) { say("Referral applied!", true); box.querySelector("#wpRefCount").textContent = d.count; } else say(d.error || "Could not apply"); }).catch(function() { say("Network error"); }); };
     fetch("/api/referrals/me", { credentials: "include" }).then(function(r) { return r.json(); }).then(function(d) { if (d && d.code) { box.querySelector("#wpRefCode").textContent = d.code; box.querySelector("#wpRefCount").textContent = d.count; } }).catch(function() {});
+    refreshGiftHistory();
   }
   function ensureChipButtons() {
     var chip = document.getElementById("wp-chip");

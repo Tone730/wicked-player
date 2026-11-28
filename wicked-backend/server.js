@@ -39,7 +39,7 @@ const server = http.createServer(app);
 
 /* baseline security headers, request ids, and rate limits */
 const { applyHardening } = require('./lib/hardening');
-const { readJSON, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
+const { readJSON, readJSONStrict, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
 const {
   canonicalGenreName,
   collectWithin,
@@ -53,6 +53,11 @@ const {
   trackMatchScore,
 } = require('./lib/music-catalog');
 const accessLog = require('./lib/access-log');
+const { resolveFastestWithPreview, resolveProviderPreview } = require('./lib/provider-preview');
+const {
+  PremiumRedemptionError,
+  redeemPremiumReward,
+} = require('./lib/premium-redemptions');
 applyHardening(app);
 app.use(accessLog.middleware);
 
@@ -90,6 +95,11 @@ auth.setUsageEmitter((row) => {
     const room = io.sockets.adapter.rooms.get('admins');
     if (room && room.size) io.to('admins').emit('usage:heartbeat', row);
   } catch {}
+});
+/* Premium grants and automatic redemptions are pushed only to signed-in
+   admins, so the redemption log updates without waiting for a page refresh. */
+auth.setPremiumRedemptionEmitter((row) => {
+  try { io.to('admins').emit('premium:redemption', row); } catch {}
 });
 
 /* media files (uploaded images/audio/video) */
@@ -408,6 +418,7 @@ const PREVIEW_CACHE_TTL_MS = Math.max(5, Math.min(180,
   Number(process.env.PREVIEW_CACHE_TTL_MIN) || 45)) * 60 * 1000;
 const genreCache = new Map();
 const previewCache = new Map();
+const providerPreviewPending = new Map();
 
 function catalogKey(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -448,6 +459,41 @@ function previewFor(query) {
   }
   const { expiresAt, ...data } = hit;
   return data;
+}
+
+/* Provider lookups are short and cheap compared with yt-dlp. When playback
+   starts from a library, radio, or direct link (and therefore has no preview
+   in the request), resolve one concurrently with the full stream. The preview
+   is returned as soon as it is available; the yt-dlp job continues and caches
+   the complete stream for the upgrade request. */
+async function providerPreviewJson(provider, params, timeoutMs) {
+  if (provider === 'deezer') {
+    const response = await axios.get('https://api.deezer.com/search', { params, timeout: timeoutMs });
+    return response.data;
+  }
+  const response = await axios.get('https://itunes.apple.com/search', { params, timeout: timeoutMs });
+  return response.data;
+}
+
+function lookupProviderPreview(query) {
+  const key = catalogKey(query);
+  if (!key) return Promise.resolve(null);
+  const cached = previewFor(query);
+  if (cached) return Promise.resolve(cached);
+  const existing = providerPreviewPending.get(key);
+  if (existing) return existing;
+
+  const promise = resolveProviderPreview(query, {
+    getJson: providerPreviewJson,
+    timeoutMs: 2500,
+  }).then((preview) => {
+    if (!preview) return null;
+    return rememberPreview(query, preview.audio_url, preview.title, preview.duration) || preview;
+  }).catch(() => null).finally(() => {
+    if (providerPreviewPending.get(key) === promise) providerPreviewPending.delete(key);
+  });
+  providerPreviewPending.set(key, promise);
+  return promise;
 }
 function mapItunesTrack(t, genre = null) {
   const name = t.trackName || '';
@@ -711,24 +757,150 @@ const adminAuth = (req, res, next) => {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ msg: 'no' });
   next();
 };
-const codesFile = './data/codes.json';
-function jsonRead(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } }
-function jsonWrite(file, data) { tryWriteJSON(file, data); }
+const codesFile = path.join(__dirname, 'data', 'codes.json');
+const rewardsFile = path.join(__dirname, 'data', 'rewards.json');
+const communityFile = path.join(__dirname, 'data', 'community.json');
+function jsonRead(file) { return readJSON(file, {}); }
+function jsonWrite(file, data) { atomicWriteJSON(file, data); }
 /* ============================================================
    REWARDS: random drops for listening time - claim via Discord
 ============================================================ */
-const rewardsFile = './data/rewards.json';
-async function readRewards() {
-  try { return JSON.parse(await fs.promises.readFile(rewardsFile, 'utf8')); } catch { return { issued: [] }; }
+function isPremiumRewardType(type) {
+  return type === 'premium' || type === 'jackpot';
 }
-async function writeRewards(d) { await fs.promises.writeFile(rewardsFile, JSON.stringify(d, null, 2)); }
+function premiumRewardLabel(type) {
+  return type === 'jackpot'
+    ? 'JACKPOT - Premium redeemed automatically (7 days active)'
+    : 'Premium redeemed automatically (30 days active)';
+}
+function readRewards() {
+  const saved = readJSONStrict(rewardsFile, { issued: [] });
+  return saved && Array.isArray(saved.issued) ? saved : { issued: [] };
+}
+function writeRewards(d) { atomicWriteJSON(rewardsFile, d); }
+function rewardRedemptionState(rewards) {
+  const comm = readJSONStrict(communityFile, { profiles: {} });
+  const receipts = comm && comm.premiumRedemptions && typeof comm.premiumRedemptions === 'object'
+    ? comm.premiumRedemptions
+    : {};
+  let changed = false;
+  for (const reward of rewards.issued || []) {
+    if (!reward || !reward.redemptionId) continue;
+    const receipt = receipts[reward.redemptionId];
+    if (!receipt) continue;
+    const label = premiumRewardLabel(reward.type);
+    if (reward.status !== 'redeemed' || reward.autoRedeemed !== true
+      || reward.redeemedAt !== receipt.redeemedAt || reward.redeemedBy !== receipt.redeemedBy
+      || reward.until !== receipt.until || reward.claimed !== true
+      || reward.label !== label) {
+      reward.status = 'redeemed';
+      reward.autoRedeemed = true;
+      reward.redeemedAt = receipt.redeemedAt;
+      reward.redeemedBy = receipt.redeemedBy || receipt.user;
+      reward.until = receipt.until;
+      reward.claimed = true;
+      reward.claimedAt = reward.claimedAt || receipt.redeemedAt;
+      reward.label = label;
+      changed = true;
+    }
+  }
+  return { comm, changed };
+}
+
+/* Commit a premium reward: the grant, receipt, and code-consumption marker
+   land in one community write, and only then is the reward mirror updated.
+   The redemption id is the idempotency key, so a retry after a lost response
+   returns the original receipt instead of granting premium twice. */
+function commitPremiumReward(d, rw, req, now) {
+  let comm;
+  let codes;
+  try {
+    comm = readJSONStrict(communityFile, { profiles: {} });
+    codes = readJSONStrict(codesFile, {});
+  } catch (error) {
+    process.stderr.write(`[rewards] store read failed: ${error && error.message || error}\n`);
+    return { ok: false, status: 503, message: 'The premium store is unavailable. Please try again.' };
+  }
+
+  let result;
+  try {
+    result = redeemPremiumReward({
+      community: comm,
+      user: rw.user,
+      rewardCode: rw.code,
+      premiumCode: rw.premiumCode,
+      type: rw.type,
+      id: rw.redemptionId,
+      now: Number(rw.at) || now,
+    });
+  } catch (error) {
+    const status = error instanceof PremiumRedemptionError ? error.status : 503;
+    const message = error instanceof PremiumRedemptionError
+      ? error.message
+      : 'The premium reward could not be redeemed. Please try again.';
+    process.stderr.write(`[rewards] automatic redemption failed: ${error && error.message || error}\n`);
+    return { ok: false, status, message };
+  }
+
+  try {
+    atomicWriteJSON(communityFile, comm);
+  } catch (error) {
+    process.stderr.write(`[rewards] community save failed: ${error && error.message || error}\n`);
+    return { ok: false, status: 503, message: 'The premium reward could not be saved. Please try again.' };
+  }
+
+  const redemption = result.redemption;
+  rw.status = 'redeemed';
+  rw.autoRedeemed = true;
+  rw.redeemedAt = redemption.redeemedAt;
+  rw.redeemedBy = redemption.redeemedBy || rw.user;
+  rw.until = redemption.until;
+  rw.claimed = true;
+  rw.claimedAt = rw.claimedAt || redemption.redeemedAt;
+  rw.label = premiumRewardLabel(rw.type);
+  try {
+    writeRewards(d);
+  } catch (error) {
+    /* The grant and receipt are already committed. The rewards endpoint
+       reconciles this pending mirror from the community receipt. */
+    process.stderr.write(`[rewards] redeemed mirror failed: ${error && error.message || error}\n`);
+  }
+
+  codes[rw.premiumCode] = {
+    type: rw.type,
+    days: redemption.days,
+    used: true,
+    usedBy: rw.user,
+    usedAt: redemption.redeemedAt,
+    redemptionId: redemption.id,
+  };
+  try {
+    jsonWrite(codesFile, codes);
+  } catch (error) {
+    process.stderr.write(`[rewards] code mirror failed: ${error && error.message || error}\n`);
+  }
+  try { auth.logRedemption(redemption); } catch {}
+  try {
+    auth.appendActivity('premium-reward', req, {
+      code: rw.code,
+      days: redemption.days,
+      redemptionId: redemption.id,
+      status: 'redeemed',
+      autoRedeemed: true,
+      redeemedAt: redemption.redeemedAt,
+    });
+  } catch {}
+  try { io.to('admins').emit('premium:redemption', redemption); } catch {}
+
+  return { ok: true, reward: rw, redemption };
+}
   const REWARD_TYPES = [
     { type: 'badge',     label: 'Loyalty badge - show it off on your profile',      weight: 18 },
     { type: 'bonus',     label: 'Bonus soundboard pack (this week only)',           weight: 14 },
     { type: 'shoutout',  label: 'Discord shoutout from the host',                    weight: 10 },
     { type: 'skip',      label: '5 unlimited-skip boosters',                        weight: 12 },
-    { type: 'premium',   label: 'FREE Premium code - redeem in Settings',           weight: 8  },
-    { type: 'jackpot',   label: 'JACKPOT - 7-day Premium code',                     weight: 3  },
+    { type: 'premium',   label: 'FREE Premium - automatic redemption',               weight: 8  },
+    { type: 'jackpot',   label: 'JACKPOT - 7-day Premium - automatic redemption',    weight: 3  },
     { type: 'skip10',    label: '10 unlimited-skip boosters',                       weight: 8  },
     { type: 'avatar',    label: 'Animated avatar frame - 30 days',                  weight: 6  },
     { type: 'eqboost',   label: 'Bonus EQ preset: Bass Cannon (30 days)',           weight: 6  },
@@ -747,14 +919,39 @@ function rollReward() {
 function rewardCode() {
   return 'WK-' + Array.from({ length: 6 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 }
-app.post('/api/reward/issue', async (req, res) => {
+app.post('/api/reward/issue', (req, res) => {
   const user = sessionUser(req);
   if (!user) return res.status(401).json({ error: 'Login required' });
+  if (auth.isBannedNow(auth.users[user])) return res.status(403).json({ error: 'This account is banned' });
   const now = Date.now();
-  const d = await readRewards();
-  const mine = d.issued.filter((r) => r.user === user);
+  let d;
+  try {
+    d = readRewards();
+    rewardRedemptionState(d);
+  } catch (error) {
+    process.stderr.write(`[rewards] reward read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The reward store is unavailable. Please try again.' });
+  }
+
+  /* A premium reward whose redemption never committed is retried with the
+     same redemption id, so the retry grants exactly once. */
+  const pending = d.issued
+    .filter((r) => r && r.user === user && isPremiumRewardType(r.type)
+      && (r.status === 'pending_redemption' || r.status === 'failed'))
+    .sort((a, b) => b.at - a.at)[0];
+  if (pending) {
+    pending.status = 'pending_redemption';
+    const retried = commitPremiumReward(d, pending, req, now);
+    if (retried.ok) return res.json(retried.reward);
+    pending.status = 'failed';
+    pending.failure = retried.message;
+    try { writeRewards(d); } catch {}
+    return res.status(retried.status).json({ error: retried.message });
+  }
+
+  const mine = d.issued.filter((r) => r && r.user === user && r.status !== 'failed');
   const last = mine.sort((a, b) => b.at - a.at)[0];
-  const lastWait = last?.waitMs || 50 * 60 * 1000;
+  const lastWait = last?.nextWaitMs || last?.waitMs || 50 * 60 * 1000;
   if (last && now - last.at < lastWait) return res.json({ none: true, waitMs: lastWait - (now - last.at) });
   const type = rollReward();
   const hours = Math.max(0, Math.min(1000, Number(req.body.minutes) || 0)) / 60;
@@ -762,21 +959,58 @@ app.post('/api/reward/issue', async (req, res) => {
   if (hours >= 1 && (type.type === 'badge' || type.type === 'shoutout') && Math.random() < Math.min(0.5, hours * 0.05)) {
     finalType = Math.random() < 0.25 ? REWARD_TYPES.find((t) => t.type === 'jackpot') : REWARD_TYPES.find((t) => t.type === 'premium');
   }
-  const rw = { code: rewardCode(), user, type: finalType.type, label: finalType.label, at: now, claimed: false };
-  if (finalType.type === 'premium' || finalType.type === 'jackpot') {
+  let issuedCode = rewardCode();
+  while (d.issued.some((reward) => reward && reward.code === issuedCode)) issuedCode = rewardCode();
+  const rw = {
+    code: issuedCode,
+    user,
+    type: finalType.type,
+    label: finalType.label,
+    at: now,
+    claimed: false,
+    status: 'issued',
+  };
+  const premiumReward = isPremiumRewardType(finalType.type);
+  if (premiumReward) {
+    let comm;
+    let codes;
+    try {
+      comm = readJSONStrict(communityFile, { profiles: {} });
+      codes = readJSONStrict(codesFile, {});
+    } catch (error) {
+      process.stderr.write(`[rewards] store read failed: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: 'The premium store is unavailable. Please try again.' });
+    }
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const premiumCode = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-    const codes = await jsonRead(codesFile);
-    codes[premiumCode] = true;
-    await jsonWrite(codesFile, codes);
-    rw.premiumCode = premiumCode;
-    rw.label = finalType.type === 'jackpot' ? 'JACKPOT - Premium code ' + premiumCode : 'FREE Premium code ' + premiumCode + ' - redeem in Settings';
+    do {
+      rw.premiumCode = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    } while (codes[rw.premiumCode] || comm.premiumCodeRedemptions?.[rw.premiumCode]);
+    rw.redemptionId = crypto.randomUUID();
+    rw.label = 'Premium reward - redeeming automatically...';
+    rw.status = 'pending_redemption';
   }
   d.issued.push(rw);
   if (d.issued.length > 500) d.issued = d.issued.slice(-500);
   rw.nextWaitMs = 50 * 60 * 1000 + Math.floor(Math.random() * 70 * 60 * 1000);
-  await writeRewards(d);
-  res.json(rw);
+
+  /* Persist the reward first. If that write fails, no premium is granted. */
+  try {
+    writeRewards(d);
+  } catch (error) {
+    process.stderr.write(`[rewards] reward save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The reward could not be saved. Please try again.' });
+  }
+
+  if (!premiumReward) return res.json(rw);
+
+  const outcome = commitPremiumReward(d, rw, req, now);
+  if (!outcome.ok) {
+    rw.status = 'failed';
+    rw.failure = outcome.message;
+    try { writeRewards(d); } catch {}
+    return res.status(outcome.status).json({ error: outcome.message });
+  }
+  return res.json(rw);
 });
 app.get('/api/config/discord-invite', (_req, res) => {
   let invite = process.env.DISCORD_INVITE || null;
@@ -816,24 +1050,68 @@ app.post('/library/playlists/remove-track', (req, res) => {
   res.json({ ok: true, trackCount: pl.tracks.length });
 });
 
-app.get('/api/rewards', async (req, res) => {
+app.get('/api/rewards', (req, res) => {
   const user = sessionUser(req);
   if (!user) return res.status(401).json({ error: 'Login required' });
-  const d = await readRewards();
-  res.json(d.issued.filter((r) => r.user === user).sort((a, b) => b.at - a.at).slice(0, 30));
+  let d;
+  try {
+    d = readRewards();
+    const state = rewardRedemptionState(d);
+    if (state.changed) {
+      try { writeRewards(d); } catch {}
+    }
+  } catch (error) {
+    process.stderr.write(`[rewards] list read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The reward store is unavailable. Please try again.' });
+  }
+  res.json(d.issued.filter((r) => r && r.user === user).sort((a, b) => b.at - a.at).slice(0, 30));
 });
-app.get('/api/admin/rewards', adminAuth, async (req, res) => {
-  const d = await readRewards();
+app.get('/api/admin/rewards', adminAuth, (req, res) => {
+  let d;
+  try {
+    d = readRewards();
+    const state = rewardRedemptionState(d);
+    if (state.changed) {
+      try { writeRewards(d); } catch {}
+    }
+  } catch (error) {
+    process.stderr.write(`[rewards] admin read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The reward store is unavailable. Please try again.' });
+  }
   res.json(d.issued.sort((a, b) => b.at - a.at).slice(0, 100));
 });
-app.post('/api/admin/reward/claim', adminAuth, async (req, res) => {
+app.post('/api/admin/reward/claim', adminAuth, (req, res) => {
   const code = String(req.body.code || '').toUpperCase().trim();
-  const d = await readRewards();
-  const rw = d.issued.find((r) => r.code === code);
+  let d;
+  let comm;
+  try {
+    d = readRewards();
+    const state = rewardRedemptionState(d);
+    comm = state.comm;
+  } catch (error) {
+    process.stderr.write(`[rewards] claim read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The reward store is unavailable. Please try again.' });
+  }
+  const rw = d.issued.find((r) => r && r.code === code);
   if (!rw) return res.status(404).json({ error: 'Unknown code' });
-  rw.claimed = true; rw.claimedAt = Date.now();
-  await writeRewards(d);
-  res.json({ ok: true, reward: rw });
+  /* Only a committed receipt proves the premium was actually redeemed. A
+     legacy premium reward without one is still a manual Discord claim. */
+  const receipts = comm && comm.premiumRedemptions && typeof comm.premiumRedemptions === 'object'
+    ? comm.premiumRedemptions
+    : {};
+  const receipt = rw.redemptionId ? receipts[rw.redemptionId] : null;
+  const alreadyRedeemed = Boolean(rw.autoRedeemed || receipt);
+  rw.claimed = true;
+  rw.claimedAt = rw.claimedAt || Date.now();
+  rw.claimMethod = alreadyRedeemed ? 'automatic' : 'discord';
+  if (!alreadyRedeemed) rw.status = 'claimed';
+  try {
+    writeRewards(d);
+  } catch (error) {
+    process.stderr.write(`[rewards] claim save failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The reward claim could not be saved.' });
+  }
+  res.json({ ok: true, alreadyRedeemed, reward: rw });
 });
 
 
@@ -1440,9 +1718,23 @@ function getStream(query, options = {}) {
 
   /* Provider previews start playback immediately while the complete stream is
      resolved and cached in the background for the next play. */
-  if (preview) {
+  if (preview && !options.upgrade) {
     streamStats.previews++;
     return Promise.resolve({ ...preview, cache: 'preview' });
+  }
+
+  /* A direct/library/radio selection may not have a preview in its URL. Look
+     one up concurrently instead of making the listener wait for yt-dlp. The
+     full-resolution promise remains pending and is used by the upgrade
+     request; a preview never enters the full-stream cache. */
+  if (!options.background && !options.upgrade) {
+    const providerPreview = lookupProviderPreview(query).then((data) => (
+      data ? { ...data, cache: 'preview' } : null
+    ));
+    return resolveFastestWithPreview(p, providerPreview).then((result) => {
+      if (result.source === 'preview') streamStats.previews++;
+      return result.data;
+    });
   }
   return p;
 }

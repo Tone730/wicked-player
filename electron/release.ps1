@@ -48,10 +48,10 @@ if ($indexHtml -notmatch [regex]::Escape($requiredBundle)) {
   Write-Host "!! index.html does not reference authoritative bundle: $requiredBundle" -ForegroundColor Red
   exit 1
 }
-if ($indexHtml -notmatch 'enhance\.js\?ov=17') { Write-Host '!! index.html does not reference enhance.js?ov=17' -ForegroundColor Red; exit 1 }
+if ($indexHtml -notmatch 'enhance\.js\?ov=18') { Write-Host '!! index.html does not reference enhance.js?ov=18' -ForegroundColor Red; exit 1 }
 if ($indexHtml -notmatch 'notification-policy\.js\?ov=1') { Write-Host '!! index.html does not reference notification-policy.js?ov=1' -ForegroundColor Red; exit 1 }
 if ($indexHtml -notmatch 'playback-policy\.js\?ov=2') { Write-Host '!! index.html does not reference playback-policy.js?ov=2' -ForegroundColor Red; exit 1 }
-if ($indexHtml -notmatch 'index-2kADS7Vh-p4\.js\?v=3513') { Write-Host '!! index.html does not reference the versioned authoritative bundle' -ForegroundColor Red; exit 1 }
+if ($indexHtml -notmatch 'index-2kADS7Vh-p4\.js\?v=3514') { Write-Host '!! index.html does not reference the versioned authoritative bundle' -ForegroundColor Red; exit 1 }
 
 # 3. package exe + metadata
 Write-Host '[2/3] packaging exe...' -ForegroundColor Gray

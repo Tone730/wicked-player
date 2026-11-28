@@ -357,7 +357,7 @@
         </div>
         <div class="box" style="margin-top:16px">
           <div class="boxhead"><h2>Redemption log</h2></div>
-          <table><thead><tr><th>User</th><th>Code</th><th>Days</th><th>When</th></tr></thead><tbody id="premLogRows"></tbody></table>
+          <table><thead><tr><th>Recipient</th><th>Type</th><th>From / code</th><th>Redeemed by</th><th>Days</th><th>Redeemed</th><th>Status</th></tr></thead><tbody id="premLogRows"></tbody></table>
         </div>
       </section>
 
@@ -631,7 +631,10 @@ function renderPremium(){
   const logs=S.premium.redemptions.filter(x=>matchRow(x,'premium'));
   S.export.premium=logs;
   $('#premLogRows').innerHTML = logs.length ? logs.slice(0,80).map(r=>`<tr>
-    <td>${esc(r.user)}</td><td class="mono">${esc(r.code)}</td><td class="mono">${esc(r.days||0)}</td><td class="mono">${fmt(r.at)}</td></tr>`).join('') : emptyRow(4,'No redemptions yet');
+    <td>${esc(r.user)}</td><td><span class="pill ${r.kind==='gift'?'v':'n'}">${esc(r.kind||'code')}</span></td>
+    <td class="mono">${esc(r.giftedBy||r.issuedBy||r.code||'—')}</td><td>${esc(r.redeemedBy||r.user||'—')}</td>
+    <td class="mono">${esc(r.days||0)}</td>
+    <td class="mono">${fmt(r.redeemedAt||r.at)}</td><td><span class="pill ${r.status==='redeemed'||r.status==='active'?'v':'n'}">${esc(r.status||'redeemed')}</span></td></tr>`).join('') : emptyRow(7,'No redemptions yet');
 }
 
 function renderSystem(){
@@ -760,7 +763,7 @@ document.addEventListener('click', async (e)=>{
         access:[{key:'user',label:'User'},{key:'type',label:'Type'},{key:'at',label:'When',get:x=>fmt(x.at||x.created)},{key:'ip',label:'IP'}],
         activity:[{key:'user',label:'User'},{key:'type',label:'Type'},{key:'at',label:'When',get:x=>fmt(x.at)},{key:'title',label:'Detail',get:x=>x.title||x.detail||''}],
         listening:[{key:'user',label:'User'},{key:'minutes',label:'Minutes'},{key:'plays',label:'Plays'},{key:'topArtists',label:'Top artists',get:x=>(x.topArtists||[]).map(a=>a.name).join(', ')}],
-        premium:[{key:'user',label:'User'},{key:'code',label:'Code'},{key:'days',label:'Days'},{key:'at',label:'When',get:x=>fmt(x.at)}],
+        premium:[{key:'user',label:'Recipient'},{key:'kind',label:'Type'},{key:'from',label:'From / code',get:x=>x.giftedBy||x.issuedBy||x.code||''},{key:'redeemedBy',label:'Redeemed by',get:x=>x.redeemedBy||x.user||''},{key:'days',label:'Days'},{key:'redeemedAt',label:'Redeemed',get:x=>fmt(x.redeemedAt||x.at)},{key:'status',label:'Status'}],
         errors:[{key:'at',label:'When',get:x=>fmt(x.at)},{key:'kind',label:'Kind'},{key:'message',label:'Message'}],
         security:[{key:'at',label:'When',get:x=>fmt(x.at)},{key:'event',label:'Event'},{key:'actor',label:'Actor'},{key:'detail',label:'Detail'}],
         usage:[{key:'at',label:'When',get:x=>fmt(x.at)},{key:'kind',label:'Kind'},{key:'user',label:'Account',get:x=>x.user||'anonymous'},{key:'vid',label:'Visitor'},{key:'track',label:'Track',get:x=>x.track&&x.track.name?x.track.name:''}],
@@ -850,6 +853,17 @@ if(typeof io==='function'){
       if(!S.alerts.alerts.some(x=>x.id===a.id)) S.alerts.alerts.unshift(a);
       renderAlerts();
       toast('Alert: '+String(a.message||'').slice(0,80),true);
+    });
+    sock.on('premium:redemption',(row)=>{
+      if(!row||!row.user) return;
+      S.premium=S.premium||{requests:[],active:[],redemptions:[]};
+      S.premium.redemptions=S.premium.redemptions||[];
+      const id=String(row.id||`${row.kind||'code'}|${row.user}|${row.at||row.redeemedAt||0}`);
+      if(!S.premium.redemptions.some(x=>String(x.id||`${x.kind||'code'}|${x.user}|${x.at||x.redeemedAt||0}`)===id)) S.premium.redemptions.unshift(row);
+      S.premium.redemptions.sort((a,b)=>Number(b.redeemedAt||b.at||0)-Number(a.redeemedAt||a.at||0));
+      renderPremium();
+      const who=row.giftedBy?`${row.giftedBy} → ${row.user}`:row.user;
+      toast(`Premium redeemed: ${who}`);
     });
     sock.on('usage:heartbeat',(row)=>{
       if(!row||!row.vid) return;

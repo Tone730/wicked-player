@@ -10,8 +10,19 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { readJSON, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
+const { readJSON, readJSONStrict, atomicWriteJSON, tryWriteJSON } = require('./lib/store');
 const accessLog = require('./lib/access-log');
+const {
+  GiftError,
+  grantPremiumDays,
+  listGiftRedemptions,
+  redeemPremiumGift,
+} = require('./lib/premium-gifts');
+const {
+  PremiumRedemptionError,
+  listPremiumRedemptions,
+  redeemPremiumCode,
+} = require('./lib/premium-redemptions');
 
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'accounts.json');
@@ -408,12 +419,17 @@ router.post('/api/presence/np', (req, res) => {
 });
 
 /* ---------- premium redemption system ----------
-   Codes (WK-XXXXXX / premium codes) live in ../data/codes.json via server.js.
-   A user submits a code -> it activates time-limited premium on their
-   community profile and logs a redemption the admin can review/revoke. */
+   Premium code metadata lives in data/codes.json. The community document is
+   the authoritative grant/receipt/consumption store, so one atomic write
+   prevents a code from being reused after a successful response. */
 
 function readJsonSafe(file, fallback) {
   return readJSON(file, fallback);
+}
+/* Authoritative stores must fail closed: a corrupt community file may never be
+   replaced with an empty document by a redemption request. */
+function readCommunityStrict() {
+  return readJSONStrict(COMM_FILE, { profiles: {} });
 }
 function appendActivity(type, req, extra) {
   const u = userFromReq(req);
@@ -451,6 +467,8 @@ const usageCooldown = new Map();   // vid|kind|track -> last timestamp
 const liveVisitors = new Map();    // vid hash -> latest live row
 let usageEmitter = null;
 function setUsageEmitter(fn) { usageEmitter = fn; }
+let premiumRedemptionEmitter = null;
+function setPremiumRedemptionEmitter(fn) { premiumRedemptionEmitter = fn; }
 
 function usageHeartbeat(req, res) {
   try {
@@ -526,81 +544,200 @@ function premiumActive(p) {
 router.post("/api/reward/redeem", (req, res) => {
   const u = userFromReq(req);
   if (!u) return res.status(401).json({ error: "Login required", auth: true });
+  if (isBannedNow(u.account)) return res.status(403).json({ error: "This account is banned" });
   const code = String(req.body.code || "").toUpperCase().trim();
   if (!code) return res.status(400).json({ error: "Enter your code" });
 
-  const codes = readJsonSafe(CODES_FILE, {});
-  const entry = codes[code];
-  if (!entry) return res.status(404).json({ error: "Unknown code. Check for typos." });
-  if (entry.used) return res.status(409).json({ error: "That code was already used" });
+  let codes;
+  let comm;
+  try {
+    codes = readJSONStrict(CODES_FILE, {});
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] premium code read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: "The redemption store is unavailable. Please try again." });
+  }
+  let result;
+  try {
+    /* Legacy reward codes were stored without their duration. The reward that
+       issued the code still knows whether it was a 7-day jackpot. */
+    const rewardStore = readJsonSafe(path.join(DATA_DIR, 'rewards.json'), { issued: [] });
+    const hints = {};
+    for (const reward of (Array.isArray(rewardStore.issued) ? rewardStore.issued : [])) {
+      if (!reward || !reward.premiumCode) continue;
+      hints[String(reward.premiumCode).toUpperCase()] = {
+        type: reward.type,
+        days: reward.type === 'jackpot' ? 7 : 30,
+      };
+    }
+    result = redeemPremiumCode({
+      community: comm,
+      codes,
+      code,
+      user: u.username,
+      id: crypto.randomUUID(),
+      hints,
+    });
+  } catch (error) {
+    if (error instanceof PremiumRedemptionError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
+    throw error;
+  }
 
-  const days = entry.days || (entry.type === "jackpot" ? 7 : 30);
-  const until = Date.now() + days * 86400000;
+  if (!result.idempotent) {
+    /* The community document commits the grant, receipt, and code-consumption
+       marker together. A successful response therefore never leaves a reusable
+       premium code behind. */
+    try {
+      atomicWriteJSON(COMM_FILE, comm);
+    } catch (error) {
+      process.stderr.write(`[auth] premium code save failed: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: "The redemption could not be saved. Please try again." });
+    }
+  }
 
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-  comm.profiles = comm.profiles || {};
-  const prof = comm.profiles[u.username] || {};
-  const prevUntil = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : 0;
-  prof.premium = true;
-  prof.premiumUntil = Math.max(prevUntil, until);
-  prof.premiumSource = "code:" + code;
-  comm.profiles[u.username] = prof;
-  fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2));
+  /* Keep the legacy codes mirror current for older tooling. The community
+     marker above remains authoritative if this optional mirror fails. */
+  codes[code] = {
+    used: true,
+    usedBy: u.username,
+    usedAt: result.redemption.redeemedAt,
+    days: result.redemption.days,
+    redemptionId: result.redemption.id,
+  };
+  try {
+    atomicWriteJSON(CODES_FILE, codes);
+  } catch (error) {
+    process.stderr.write(`[auth] premium code mirror failed: ${error && error.message || error}\n`);
+  }
 
-  codes[code] = { used: true, usedBy: u.username, usedAt: Date.now(), days };
-  fs.writeFileSync(CODES_FILE, JSON.stringify(codes, null, 2));
+  if (!result.idempotent) {
+    logRedemption(result.redemption);
+    appendActivity('premium-code', req, {
+      code,
+      days: result.redemption.days,
+      redemptionId: result.redemption.id,
+      status: 'redeemed',
+      redeemedAt: result.redemption.redeemedAt,
+    });
+    try { if (premiumRedemptionEmitter) premiumRedemptionEmitter(result.redemption); } catch {}
+  }
 
-  const log = readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []);
-  log.unshift({ user: u.username, code: code, days: days, at: Date.now(), status: "active", until: prof.premiumUntil });
-  fs.writeFileSync(path.join(DATA_DIR, "redemptions.json"), JSON.stringify(log.slice(0, 200), null, 2));
-
-  res.json({ ok: true, days: days, until: prof.premiumUntil });
+  res.json({
+    ok: true,
+    days: result.redemption.days,
+    until: result.redemption.until,
+    status: 'redeemed',
+    redeemedAt: result.redemption.redeemedAt,
+    redemptionId: result.redemption.id,
+    alreadyRedeemed: Boolean(result.idempotent),
+  });
 });
 
 /* ---------- premium gifting + referral credits ---------- */
-function grantPremiumDays(comm, name, days, source) {
-  comm.profiles = comm.profiles || {};
-  const prof = comm.profiles[name] || {};
-  const prev = prof.premiumUntil && Date.now() < prof.premiumUntil ? prof.premiumUntil : Date.now();
-  prof.premium = true;
-  prof.premiumUntil = prev + (Number(days) || 30) * 86400000;
-  prof.premiumSource = source;
-  comm.profiles[name] = prof;
-  return prof;
-}
 function logRedemption(row) {
   const log = readJsonSafe(path.join(DATA_DIR, 'redemptions.json'), []);
   log.unshift(row);
   try { fs.writeFileSync(path.join(DATA_DIR, 'redemptions.json'), JSON.stringify(log.slice(0, 200), null, 2)); } catch {}
 }
 
-/* A premium member can gift 7/30 days to another registered account.
-   Rate-limited to one gift per 7 days to prevent runaway granting. */
+/* A premium member can gift 7/30 days to another registered account. The gift
+   is redeemed automatically for the recipient. The grant, sender receipt, and
+   redemption id are committed in one atomic profile write, so an admin and
+   the sender always see the same successful redemption. */
 router.post('/api/premium/gift', (req, res) => {
   const u = userFromReq(req);
   if (!u) return res.status(401).json({ error: 'Login required', auth: true });
-  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-  comm.profiles = comm.profiles || {};
-  const sender = comm.profiles[u.username] || {};
-  if (!premiumActive(sender)) return res.status(403).json({ error: 'Premium is required to gift it' });
-  if (sender.lastGiftAt && Date.now() - sender.lastGiftAt < 7 * 86400000) {
-    return res.status(429).json({ error: 'You can send one gift every 7 days' });
-  }
   const to = String(req.body.user || '').trim();
   if (!/^[a-zA-Z0-9_.-]{2,20}$/.test(to)) return res.status(400).json({ error: 'Enter a valid username' });
-  if (!users[to]) return res.status(404).json({ error: "No account named '" + to + "'" });
-  if (to === u.username) return res.status(400).json({ error: 'You cannot gift yourself' });
-  const days = Number(req.body.days) === 7 ? 7 : 30;
-  const prof = grantPremiumDays(comm, to, days, 'gift:' + u.username);
-  sender.lastGiftAt = Date.now();
-  sender.giftedTo = (sender.giftedTo || []).filter((g) => g && g.user !== to);
-  sender.giftedTo.unshift({ user: to, days, at: Date.now() });
-  sender.giftedTo = sender.giftedTo.slice(0, 50);
-  comm.profiles[u.username] = sender;
-  try { fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2)); } catch {}
-  logRedemption({ user: to, code: 'gift:' + u.username, days, at: Date.now(), status: 'active', until: prof.premiumUntil });
-  appendActivity('premium-gift', req, { to, days });
-  res.json({ ok: true, user: to, days, until: prof.premiumUntil });
+  const days = Number(req.body.days);
+  if (days !== 7 && days !== 30) {
+    return res.status(400).json({ error: 'Choose 7 or 30 days', code: 'INVALID_DAYS' });
+  }
+  const requestId = String(req.body.requestId || '').trim();
+  if (requestId && !/^[A-Za-z0-9_-]{8,64}$/.test(requestId)) {
+    return res.status(400).json({ error: 'Invalid gift request id', code: 'INVALID_REQUEST_ID' });
+  }
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] premium gift read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'The gift store is unavailable. Please try again.' });
+  }
+  comm.profiles = comm.profiles || {};
+
+  let result;
+  try {
+    result = redeemPremiumGift({
+      community: comm,
+      users,
+      sender: u.username,
+      recipient: to,
+      days,
+      id: crypto.randomUUID(),
+      requestId,
+    });
+  } catch (error) {
+    if (error instanceof GiftError) {
+      return res.status(error.status).json({ error: error.message, code: error.code });
+    }
+    throw error;
+  }
+
+  if (!result.idempotent) {
+    try {
+      atomicWriteJSON(COMM_FILE, comm);
+    } catch (error) {
+      process.stderr.write(`[auth] premium gift save failed: ${error && error.message || error}\n`);
+      return res.status(503).json({ error: 'The gift could not be saved. Please try again.' });
+    }
+
+    /* These mirrors are best-effort telemetry. The authoritative receipt is the
+       giftedTo record committed above with the premium grant. */
+    logRedemption(result.redemption);
+    appendActivity('premium-gift', req, {
+      to,
+      days,
+      giftedBy: u.username,
+      redemptionId: result.redemption.id,
+      status: 'redeemed',
+      redeemedAt: result.redemption.redeemedAt,
+    });
+    try { if (premiumRedemptionEmitter) premiumRedemptionEmitter(result.redemption); } catch {}
+  }
+
+  res.json({
+    ok: true,
+    user: to,
+    days,
+    until: result.redemption.until,
+    status: 'redeemed',
+    redeemedAt: result.redemption.redeemedAt,
+    redemptionId: result.redemption.id,
+    alreadyRedeemed: Boolean(result.idempotent),
+  });
+});
+
+/* Both sides can verify that a gift was redeemed. The sender sees sent gifts;
+   the recipient sees gifts received. Other users' gift records stay private. */
+router.get('/api/premium/gifts', (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: 'Login required', auth: true });
+  let comm;
+  try {
+    comm = readCommunityStrict();
+  } catch (error) {
+    process.stderr.write(`[auth] premium activity read failed: ${error && error.message || error}\n`);
+    return res.status(503).json({ error: 'Premium activity is unavailable right now.' });
+  }
+  const records = listGiftRedemptions(comm);
+  res.json({
+    sent: records.filter((gift) => gift.giftedBy === u.username),
+    received: records.filter((gift) => gift.user === u.username),
+    redemptions: listPremiumRedemptions(comm).filter((record) => record.user === u.username),
+  });
 });
 
 function referralOwner(code) {
@@ -641,13 +778,49 @@ router.post('/api/referrals/apply', (req, res) => {
   // Every 3 referrals rewards the referrer with 7 days of premium.
   const rewarded = Number(ref.referralRewarded) || 0;
   if (count >= (rewarded + 1) * 3) {
-    const comm = readJsonSafe(COMM_FILE, { profiles: {} });
-    const prof = grantPremiumDays(comm, owner, 7, 'referral:' + count);
-    try { fs.writeFileSync(COMM_FILE, JSON.stringify(comm, null, 2)); } catch {}
-    ref.referralRewarded = rewarded + 1;
-    saveUsers();
-    logRedemption({ user: owner, code: 'referral:' + count, days: 7, at: Date.now(), status: 'active', until: prof.premiumUntil });
-    appendActivity('referral-reward', req, { owner, count });
+    let comm;
+    try {
+      comm = readCommunityStrict();
+    } catch (error) {
+      process.stderr.write(`[auth] referral premium read failed: ${error && error.message || error}\n`);
+      comm = null;
+    }
+    if (comm) {
+      comm.profiles = comm.profiles || {};
+      comm.premiumRedemptions = comm.premiumRedemptions && typeof comm.premiumRedemptions === 'object'
+        ? comm.premiumRedemptions
+        : {};
+      const now = Date.now();
+      const redemptionId = crypto.randomUUID();
+      const granted = grantPremiumDays(comm.profiles, owner, 7, 'referral:' + count, now);
+      comm.premiumRedemptions[redemptionId] = {
+        id: redemptionId,
+        kind: 'referral',
+        user: owner,
+        redeemedBy: owner,
+        issuedBy: 'referral:' + count,
+        code: 'referral:' + count,
+        days: 7,
+        at: now,
+        redeemedAt: now,
+        status: 'redeemed',
+        autoRedeemed: true,
+        until: granted.until,
+        source: 'referral:' + count,
+      };
+      try {
+        /* The grant and its receipt land in one community write, and a lifetime
+           recipient keeps lifetime instead of being downgraded to 7 days. */
+        atomicWriteJSON(COMM_FILE, comm);
+        ref.referralRewarded = rewarded + 1;
+        saveUsers();
+        logRedemption(comm.premiumRedemptions[redemptionId]);
+        appendActivity('referral-reward', req, { owner, count, redemptionId, status: 'redeemed' });
+        try { if (premiumRedemptionEmitter) premiumRedemptionEmitter(comm.premiumRedemptions[redemptionId]); } catch {}
+      } catch (error) {
+        process.stderr.write(`[auth] referral premium save failed: ${error && error.message || error}\n`);
+      }
+    }
   }
   res.json({ ok: true, ...referralInfo(u.username) });
 });
@@ -691,7 +864,26 @@ router.get("/admin/api/premium-requests", requireAdmin, function (_req, res) {
   res.json(readJsonSafe(path.join(DATA_DIR, "premium-requests.json"), []));
 });
 router.get("/admin/api/redemptions", requireAdmin, function (_req, res) {
-  res.json(readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []).slice(0, 100));
+  const legacy = readJsonSafe(path.join(DATA_DIR, "redemptions.json"), []);
+  const comm = readJsonSafe(COMM_FILE, { profiles: {} });
+  const gifts = listGiftRedemptions(comm);
+  const committed = listPremiumRedemptions(comm);
+  const merged = [];
+  const seen = new Set();
+  for (const row of [...committed, ...gifts, ...(Array.isArray(legacy) ? legacy : [])]) {
+    if (!row || !row.user) continue;
+    const code = String(row.code || '');
+    const key = row.id
+      ? `id:${row.id}`
+      : code.startsWith('gift:')
+        ? `${code}|${row.user}`
+        : `${code || row.kind || ''}|${row.user}|${row.at || 0}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(row);
+  }
+  merged.sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
+  res.json(merged.slice(0, 100));
 });
 router.post("/admin/api/premium-request/decide", requireAdmin, function (req, res) {
   const user = String(req.body.user || "");
@@ -1208,4 +1400,5 @@ router.get('/account-chip.js', (req, res) => {
 module.exports = {
   router, gate, gateHome, userFromReq, peekUser, isBannedNow, users, sessions,
   saveUsers, saveSessions, COOKIE, hashPassword, verifyPassword, setUsageEmitter,
+  setPremiumRedemptionEmitter, logRedemption, appendActivity,
 };
